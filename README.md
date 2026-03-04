@@ -5,11 +5,15 @@ This project is a Laravel + Inertia AI assistant with:
 - conversation persistence in MySQL
 - model routing (planning vs coding)
 - deep mode (plan then execute)
-- fast mode over stream endpoint with tool-aware final output
+- streaming responses for both Fast and Deep modes over `/ai-assistant/chat/stream`
+- live stream status trail and live tool activity feed in the UI
 - optional Laravel Boost context injection
 - embedding-based retrieval and conversation memory snippets
-- filesystem tools for read/write/append/create/list operations
+- filesystem tools for read/write/edit/append/create/list operations
 - code search tool for symbol/usage discovery
+- optional shell tool (`run_shell`) with configurable command restrictions
+- enforced TypeScript quality gate for coding/CRUD responses
+- canonical page template reference support for CRUD/page generation
 
 ## High-level architecture
 
@@ -49,7 +53,7 @@ sequenceDiagram
     Controller-->>Browser: Inertia props {conversationId, messages, conversations}
 ```
 
-### 2) Fast mode (auto/planning/coding), non-stream
+### 2) Non-stream path (legacy/fallback endpoint)
 
 ```mermaid
 sequenceDiagram
@@ -74,7 +78,7 @@ sequenceDiagram
     C-->>UI: JSON response
 ```
 
-### 3) Fast mode, stream path
+### 3) Stream path (current primary path for Fast + Deep)
 
 ```mermaid
 sequenceDiagram
@@ -101,13 +105,69 @@ sequenceDiagram
     C-->>UI: {"type":"done","conversation_id":..., "model":..., ...}
 ```
 
-### 4) Deep mode
+### 4) Deep mode internals
 
 Deep mode runs two model passes inside `AiAssistantService::respondInDeepMode`:
 1. Planning stage (`planning` model first, coding fallback)
 2. Execution stage (`coding` model first, planning fallback), with the plan injected into execution prompt
 
 Both stages share Boost/retrieval/memory context.
+
+## Thinking, reasoning, model and tool-call lifecycle
+
+This section describes the exact runtime process the assistant follows per request.
+
+### Stage 1: Mode + intent decision
+- Request mode is one of: `auto`, `planning`, `coding`, `deep`.
+- In `auto`, the service infers intent from message content and recent history.
+- Continuation prompts (`continue`, `go on`, etc.) infer intent from prior conversation context.
+
+### Stage 2: Context assembly
+- Build base system prompt with workflow rules and routing policy.
+- Optionally add:
+  - Laravel Boost context (application info/routes/artisan commands),
+  - retrieval chunks from embedding search,
+  - relevant memory snippets from conversation history,
+  - canonical page template reference for CRUD/page generation.
+
+### Stage 3: Model routing
+- Planning-first path prefers `AI_ASSISTANT_MODEL_PLANNING`.
+- Coding-first path prefers `AI_ASSISTANT_MODEL_CODING`.
+- Fallback model is attempted automatically if primary fails.
+- Deep mode does two passes:
+  1. planning pass
+  2. execution pass (with plan injected)
+
+### Stage 4: Tool-call loop
+- Model output is parsed for strict JSON `tool_calls`.
+- Supported tools currently:
+  - `read_file`, `write_file`, `edit`, `append_file`, `create_directory`, `list_directory`, `search_code`, `run_shell`
+- If calls are present:
+  - tools execute server-side,
+  - structured tool results are appended back into the next model round.
+- If malformed tool-call-like output is detected:
+  - assistant asks model to retry with strict JSON only.
+- If repeated identical tool payloads are detected:
+  - assistant nudges model to issue alternative missing steps.
+- For coding/CRUD flows, a TypeScript verification step runs before final answer (`npm run types` by default).
+- If TypeScript verification fails, the assistant re-enters tool-calls to fix errors before finalizing.
+
+### Stage 5: Stream telemetry (realtime)
+- Controller emits NDJSON events to UI:
+  - `heartbeat` (status phases),
+  - `tool_activity` (requested calls/results),
+  - `chunk` (assistant text delta),
+  - `done` or `error`.
+- UI renders:
+  - elapsed time,
+  - status trail,
+  - live tool activity feed.
+- Additional status phase appears during validation: `verifying_typescript`.
+
+### Stage 6: Output cleanup + persistence
+- Assistant sanitizes raw model output (removes raw tool JSON/thinking tags if present).
+- User + assistant messages are stored in `ai_messages`.
+- Conversation summaries/last-updated timestamps are refreshed.
 
 ## Routing and endpoints
 
@@ -127,8 +187,9 @@ Current behavior:
 - supports modes:
   - `Fast` (`mode=auto`)
   - `Deep` (`mode=deep`)
-- sends JSON request to `/ai-assistant/chat` for deep mode
-- sends NDJSON request to `/ai-assistant/chat/stream` for fast mode
+- sends NDJSON request to `/ai-assistant/chat/stream` for both fast and deep modes
+- renders live status trail and tool execution feed while streaming
+- assistant messages include a `Details` toggle; Deep mode can show planning content there, and optional thinking when enabled
 - supports `New chat` button:
   - calls `POST /ai-assistant/conversations`
   - resets message list
@@ -163,7 +224,7 @@ Responsibilities:
 Tool protocol (strict JSON from model):
 - `{"tool_calls":[{"tool":"read_file","arguments":{"path":"app/Http/Controllers/Foo.php"}}]}`
 - `{"tool_calls":[{"tool":"search_code","arguments":{"query":"AiAssistantController","path":"app"}}]}`
-- Supported tools: `read_file`, `write_file`, `append_file`, `create_directory`, `list_directory`, `search_code`
+- Supported tools: `read_file`, `write_file`, `edit`, `append_file`, `create_directory`, `list_directory`, `search_code`, `run_shell`
 - The assistant executes tool calls and feeds results back to the model for final response.
 
 Returns payload including:
@@ -192,14 +253,17 @@ Responsibilities:
 - parse model tool-call JSON payloads
 - execute filesystem operations
 - enforce path policy from config (`allow_any_path` or restricted roots)
+- enforce shell safety policy, including hard blocked command patterns
 
 Supported tools:
 - `read_file`
 - `write_file`
+- `edit`
 - `append_file`
 - `create_directory`
 - `list_directory`
 - `search_code`
+- `run_shell`
 
 `search_code` arguments:
 - `query` (string, required)
@@ -219,8 +283,10 @@ Config keys:
 
 Important behavior:
 - `chatHistory` sends only the latest 20 messages to model input
-- `AiAssistantService::buildMessages` further slices to last 8 safe history messages
+- `AiAssistantService::buildMessages` further slices to last 12 safe history messages
 - message writes update parent conversation timestamp via `AiMessage::$touches = ['conversation']`
+- tool loop supports unbounded rounds when `AI_ASSISTANT_FS_MAX_TOOL_ROUNDS <= 0`
+- loop emits live tool activity events (`tool_calls`, `tool_results`, bootstrap) to UI stream
 
 ### `ProjectContextRetriever`
 
@@ -292,9 +358,25 @@ Filesystem tool config:
 - `AI_ASSISTANT_FS_ROOTS` default `base_path()` (comma-separated when set)
 - `AI_ASSISTANT_FS_MAX_READ_CHARS` default `200000`
 - `AI_ASSISTANT_FS_MAX_WRITE_CHARS` default `400000`
-- `AI_ASSISTANT_FS_MAX_TOOL_ROUNDS` default `4`
+- `AI_ASSISTANT_FS_MAX_TOOL_ROUNDS` default `16` (`<=0` means unbounded loop rounds)
 - `AI_ASSISTANT_FS_MAX_SEARCH_RESULTS` default `60`
 - `AI_ASSISTANT_FS_MAX_SEARCH_FILE_BYTES` default `300000`
+- shell tool config:
+  - `AI_ASSISTANT_FS_SHELL_ENABLED` default `false`
+  - `AI_ASSISTANT_FS_SHELL_ALLOW_ANY_COMMAND` default `false`
+  - `AI_ASSISTANT_FS_SHELL_ALLOWED_PREFIXES` (comma-separated prefixes)
+  - `AI_ASSISTANT_FS_SHELL_BLOCKED_PATTERNS` (comma-separated hard blocklist; matched commands are always denied, even when `ALLOW_ANY_COMMAND=true`)
+  - `AI_ASSISTANT_FS_SHELL_TIMEOUT_SECONDS` default `30`
+  - `AI_ASSISTANT_FS_SHELL_MAX_OUTPUT_CHARS` default `12000`
+
+Quality gate config:
+- `AI_ASSISTANT_TS_CHECK_ON_CODING` default `true`
+- `AI_ASSISTANT_TS_CHECK_COMMAND` default `npm run types -- --pretty false`
+- `AI_ASSISTANT_TS_CHECK_TIMEOUT_SECONDS` default `120`
+- `AI_ASSISTANT_TS_CHECK_MAX_OUTPUT_CHARS` default `24000`
+
+UI config:
+- `AI_ASSISTANT_UI_EXPOSE_THINKING` default `false` (when enabled, captured `<think>...</think>` content can be shown in the message details panel)
 
 ## Data model
 
@@ -376,10 +458,17 @@ Logged fields include:
 
 ## Known limitations (current code)
 
-- Retrieval index warming is not wired in runtime, so project-chunk retrieval usually returns empty with warning until cache is populated by external process.
+- Retrieval warm behavior is query-sensitive; short/simple prompts may skip lazy warm to reduce latency.
 - Attachments and voice input buttons are UI-only placeholders.
 - Automated tests for new conversation listing/switching are minimal compared to chat core behavior.
 - `AI_ASSISTANT_FS_ALLOW_ANY_PATH=true` is very permissive; use restricted roots for safer deployments.
+- Unbounded tool rounds (`AI_ASSISTANT_FS_MAX_TOOL_ROUNDS=0`) can run for a long time; keep request/model timeouts in mind.
+- TypeScript quality gate improves reliability but can increase completion time for coding-heavy tasks.
+
+## Current module state
+
+- AI-generated `orders`, `products`, and `budgets` CRUD modules were removed from the app scaffold.
+- Remaining documented routes/pages in this README refer to the AI assistant module and core starter-kit pages.
 
 ## Key files map
 
@@ -401,6 +490,10 @@ Logged fields include:
   - `routes/web.php`
 - Frontend page:
   - `resources/js/pages/ai-assistant.tsx`
+- Page template reference:
+  - `tasks/page-template-reference.md`
+  - `tasks/import-pattern-reference.md`
+  - `tasks/laravel-model-table-reference.md`
 - Config:
   - `config/ai-assistant.php`
 - Migrations:

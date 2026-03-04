@@ -271,6 +271,14 @@ class AiAssistantController extends Controller
                         @ob_flush();
                         flush();
                     },
+                    onPlanChunk: function (string $delta): void {
+                        echo json_encode([
+                            'type' => 'plan_chunk',
+                            'content' => $delta,
+                        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+                        @ob_flush();
+                        flush();
+                    },
                 );
 
                 $memory->storeMessage(
@@ -279,6 +287,17 @@ class AiAssistantController extends Controller
                     content: $message,
                     mode: $mode,
                 );
+
+                if (isset($result['plan']) && is_string($result['plan']) && trim($result['plan']) !== '') {
+                    $memory->storeMessage(
+                        conversation: $conversation,
+                        role: 'assistant',
+                        content: $result['plan'],
+                        model: is_string($result['plan_model'] ?? null) ? $result['plan_model'] : null,
+                        mode: $mode,
+                        stage: 'plan',
+                    );
+                }
 
                 $memory->storeMessage(
                     conversation: $conversation,
@@ -307,6 +326,10 @@ class AiAssistantController extends Controller
                     'conversation_id' => $conversation->id,
                     'model' => $result['model'] ?? null,
                     'fallback_used' => $result['fallback_used'] ?? false,
+                    'plan' => is_string($result['plan'] ?? null) ? $result['plan'] : null,
+                    'plan_model' => is_string($result['plan_model'] ?? null) ? $result['plan_model'] : null,
+                    'thinking' => is_string($result['thinking'] ?? null) ? $result['thinking'] : null,
+                    'plan_thinking' => is_string($result['plan_thinking'] ?? null) ? $result['plan_thinking'] : null,
                     'warnings' => $result['warnings'] ?? [],
                 ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
                 @ob_flush();

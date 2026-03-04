@@ -547,6 +547,12 @@ class FilesystemToolService
             throw new RuntimeException('Tool argument "command" is required for run_shell.');
         }
 
+        $blockedPattern = $this->matchingBlockedShellPattern($command);
+
+        if ($blockedPattern !== null) {
+            throw new RuntimeException("Shell command is blocked by safety policy (matched: {$blockedPattern}).");
+        }
+
         if (! $this->isShellCommandAllowed($command)) {
             throw new RuntimeException('Shell command is not allowed by configured prefixes.');
         }
@@ -764,6 +770,31 @@ class FilesystemToolService
         }
 
         return false;
+    }
+
+    private function matchingBlockedShellPattern(string $command): ?string
+    {
+        /** @var list<string> $patterns */
+        $patterns = (array) config('ai-assistant.tools.filesystem.shell.blocked_patterns', []);
+        $normalized = mb_strtolower(trim(preg_replace('/\s+/', ' ', $command) ?? $command));
+
+        if ($normalized === '') {
+            return null;
+        }
+
+        foreach ($patterns as $pattern) {
+            $needle = mb_strtolower(trim($pattern));
+
+            if ($needle === '') {
+                continue;
+            }
+
+            if ($normalized === $needle || str_contains($normalized, $needle)) {
+                return $pattern;
+            }
+        }
+
+        return null;
     }
 
     /**

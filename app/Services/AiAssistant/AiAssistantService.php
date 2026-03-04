@@ -27,6 +27,8 @@ class AiAssistantService
      *     fallback_used: bool,
      *     plan?: string,
      *     plan_model?: string,
+     *     thinking?: string,
+     *     plan_thinking?: string,
      *     warnings: list<string>,
      *     context: array{boost: bool, retrieval_chunks: int}
      * }
@@ -88,6 +90,7 @@ class AiAssistantService
                 'model' => $result['model'],
                 'intent' => $intent,
                 'fallback_used' => $result['fallback_used'],
+                'thinking' => $this->thinkingForUi($result['content']),
                 'warnings' => [...$warnings, ...$result['warnings']],
                 'context' => [
                     'boost' => $boost['context'] !== '',
@@ -106,11 +109,14 @@ class AiAssistantService
      * @param  list<string>  $memorySnippets
      * @param  callable(string): void|null  $onChunk
      * @param  callable(string): void|null  $onStatus
+     * @param  callable(string): void|null  $onPlanChunk
      * @return array{
      *     reply: string,
      *     model: string,
      *     intent: string,
      *     fallback_used: bool,
+     *     thinking?: string,
+     *     plan_thinking?: string,
      *     warnings: list<string>,
      *     context: array{boost: bool, retrieval_chunks: int}
      * }
@@ -123,6 +129,7 @@ class AiAssistantService
         ?callable $onChunk = null,
         ?callable $onStatus = null,
         ?callable $onToolActivity = null,
+        ?callable $onPlanChunk = null,
     ): array {
         if ($mode !== 'deep' && $this->isSimpleGreeting($message)) {
             return $this->greetingResponse($onChunk);
@@ -139,11 +146,8 @@ class AiAssistantService
                 $memorySnippets,
                 $onStatus,
                 $onToolActivity,
+                $onPlanChunk,
             );
-
-            if ($onStatus !== null) {
-                $onStatus('executing');
-            }
 
             if ($onChunk !== null) {
                 $onChunk($this->sanitizeAssistantOutput($result['reply']));
@@ -211,6 +215,7 @@ class AiAssistantService
                 'model' => $result['model'],
                 'intent' => $intent,
                 'fallback_used' => $result['fallback_used'],
+                'thinking' => $this->thinkingForUi($result['content']),
                 'warnings' => [...$warnings, ...$result['warnings']],
                 'context' => [
                     'boost' => $boost['context'] !== '',
@@ -275,6 +280,21 @@ class AiAssistantService
         if ($executionPlan !== null && trim($executionPlan) !== '') {
             $systemPrompt[] = 'Execution plan from planning stage:';
             $systemPrompt[] = $executionPlan;
+        }
+
+        if ($intent === 'coding' || $this->isCrudScaffoldRequest($message)) {
+            $importReference = $this->importPatternReferenceText();
+            $modelTableReference = $this->modelTableReferenceText();
+
+            if ($importReference !== '') {
+                $systemPrompt[] = 'Strict import rules (must follow):';
+                $systemPrompt[] = $importReference;
+            }
+
+            if ($modelTableReference !== '') {
+                $systemPrompt[] = 'Strict Laravel model/table rules (must follow):';
+                $systemPrompt[] = $modelTableReference;
+            }
         }
 
         if ($memorySnippets !== []) {
@@ -482,6 +502,10 @@ class AiAssistantService
             '- Only append a single new NavMain item inside existing mainNavItems.',
             '- Keep existing imports, AppLogo block, footer links, and layout wrappers unchanged.',
             '- If resources/js/components/app-sidebar.tsx exists, treat it as canonical and perform minimal diff edits only.',
+            'Import strictness constraints:',
+            '- Before adding imports, read target module files and match export style exactly (default vs named).',
+            '- Do not guess export style from names.',
+            "- Use `import AlertError from '@/components/alert-error';` (default import), never named import for that component.",
             'Before final response, verify files and imports with tools and ensure all CRUD paths are wired.',
             'Final response must include: completed CRUD checklist and changed file paths.',
         ]);
@@ -502,6 +526,40 @@ class AiAssistantService
         }
 
         return mb_substr($content, 0, 12000);
+    }
+
+    private function importPatternReferenceText(): string
+    {
+        $path = base_path('tasks/import-pattern-reference.md');
+
+        if (! File::exists($path) || File::isDirectory($path)) {
+            return '';
+        }
+
+        $content = trim((string) File::get($path));
+
+        if ($content === '') {
+            return '';
+        }
+
+        return mb_substr($content, 0, 8000);
+    }
+
+    private function modelTableReferenceText(): string
+    {
+        $path = base_path('tasks/laravel-model-table-reference.md');
+
+        if (! File::exists($path) || File::isDirectory($path)) {
+            return '';
+        }
+
+        $content = trim((string) File::get($path));
+
+        if ($content === '') {
+            return '';
+        }
+
+        return mb_substr($content, 0, 8000);
     }
 
     private function shouldEnableFilesystemTools(
@@ -537,6 +595,7 @@ class AiAssistantService
         array $memorySnippets = [],
         ?callable $onStatus = null,
         ?callable $onToolActivity = null,
+        ?callable $onPlanChunk = null,
     ): array
     {
         $models = [
@@ -562,11 +621,33 @@ class AiAssistantService
             $memorySnippets,
         );
 
-        $planResult = $this->chatWithFallback(
-            [$models['planning'], $models['coding']],
-            $planMessages,
-            'planning stage'
-        );
+        try {
+            $planResult = $this->chatWithFallback(
+                [$models['planning']],
+                $planMessages,
+                'planning stage',
+                null,
+            );
+        } catch (Throwable $planningException) {
+            $warnings[] = 'Deep mode planning failed; continuing execution with a minimal fallback plan.';
+            $planResult = [
+                'content' => 'Planning stage failed. Continue directly with implementation and verify changes with tools.',
+                'model' => 'system:planning-fallback',
+                'fallback_used' => false,
+            ];
+        }
+
+        if ($onPlanChunk !== null) {
+            $planPreview = $this->sanitizeAssistantOutput($planResult['content']);
+
+            if (trim($planPreview) !== '') {
+                $onPlanChunk($planPreview);
+            }
+        }
+
+        if ($onStatus !== null) {
+            $onStatus('executing');
+        }
 
         $executionMessages = $this->buildMessages(
             $message,
@@ -603,6 +684,8 @@ class AiAssistantService
             'fallback_used' => $planResult['fallback_used'] || $executionResult['fallback_used'],
             'plan' => $this->sanitizeAssistantOutput($planResult['content']),
             'plan_model' => $planResult['model'],
+            'thinking' => $this->thinkingForUi($executionResult['content']),
+            'plan_thinking' => $this->thinkingForUi($planResult['content']),
             'warnings' => $warnings,
             'context' => [
                 'boost' => $boost['context'] !== '',
@@ -632,8 +715,14 @@ class AiAssistantService
         $maxToolRounds = $unboundedToolRounds ? 0 : max(1, $configuredMaxToolRounds);
         $currentMessages = $messages;
         $crudRequest = $this->isCrudRequestFromMessages($messages);
+        $requireTypecheck = $this->shouldRunTypeScriptCheck($messages, $crudRequest);
+        $typecheckAttempted = false;
         $toolCallSignatures = [];
         $lastToolNames = [];
+
+        if ($requireTypecheck && ! $unboundedToolRounds) {
+            $maxToolRounds += 4;
+        }
 
         if ($crudRequest) {
             if (! $unboundedToolRounds) {
@@ -733,6 +822,48 @@ class AiAssistantService
 
                 if ($onStatus !== null) {
                     $onStatus('finalizing');
+                }
+
+                if ($requireTypecheck && ! $typecheckAttempted) {
+                    $typecheckAttempted = true;
+
+                    if ($onStatus !== null) {
+                        $onStatus('verifying_typescript');
+                    }
+
+                    $typecheck = $this->runTypeScriptCheck();
+
+                    if ($onToolActivity !== null) {
+                        $onToolActivity([
+                            'phase' => 'verification',
+                            'status' => $typecheck['ok'] ? 'passed' : 'failed',
+                            'round' => $round,
+                            'tools' => ['run_shell'],
+                            'results' => [[
+                                'tool' => 'run_shell',
+                                'ok' => (bool) $typecheck['ok'],
+                                'path' => is_string($typecheck['cwd'] ?? null) ? $typecheck['cwd'] : null,
+                                'error' => $typecheck['ok'] ? null : 'TypeScript check failed',
+                            ]],
+                        ]);
+                    }
+
+                    if (! $typecheck['ok']) {
+                        $toolWarnings[] = 'TypeScript check failed after implementation; requesting fixes.';
+                        $currentMessages[] = [
+                            'role' => 'assistant',
+                            'content' => $result['content'],
+                        ];
+                        $currentMessages[] = [
+                            'role' => 'user',
+                            'content' => "TypeScript check failed. Command: {$typecheck['command']}\n".
+                                "Exit code: {$typecheck['exit_code']}\n".
+                                "stdout:\n{$typecheck['stdout']}\n\nstderr:\n{$typecheck['stderr']}\n\n".
+                                'Use filesystem tools to fix all TypeScript errors, then provide final answer.',
+                        ];
+
+                        continue;
+                    }
                 }
 
                 return [
@@ -842,6 +973,80 @@ class AiAssistantService
             'model' => 'system:tool-loop-guard',
             'fallback_used' => $fallbackUsed,
             'warnings' => $toolWarnings,
+        ];
+    }
+
+    /**
+     * @param  list<array{role: string, content: string}>  $messages
+     */
+    private function shouldRunTypeScriptCheck(array $messages, bool $crudRequest): bool
+    {
+        if (! (bool) config('ai-assistant.quality.typescript_check_on_coding', true)) {
+            return false;
+        }
+
+        if ($crudRequest) {
+            return true;
+        }
+
+        return $this->resolveIntent($this->lastUserMessage($messages), 'auto', $messages) === 'coding';
+    }
+
+    /**
+     * @return array{
+     *   ok: bool,
+     *   command: string,
+     *   cwd: string|null,
+     *   exit_code: int|null,
+     *   stdout: string,
+     *   stderr: string
+     * }
+     */
+    private function runTypeScriptCheck(): array
+    {
+        $command = trim((string) config('ai-assistant.quality.typescript_check_command', 'npm run types -- --pretty false'));
+        $timeout = max(10, (int) config('ai-assistant.quality.typescript_check_timeout_seconds', 120));
+
+        if ($command === '') {
+            return [
+                'ok' => true,
+                'command' => '',
+                'cwd' => null,
+                'exit_code' => 0,
+                'stdout' => '',
+                'stderr' => '',
+            ];
+        }
+
+        try {
+            $result = $this->filesystemTools->execute([
+                'tool' => 'run_shell',
+                'arguments' => [
+                    'command' => $command,
+                    'cwd' => '.',
+                    'timeout_seconds' => $timeout,
+                ],
+            ]);
+        } catch (Throwable $exception) {
+            return [
+                'ok' => false,
+                'command' => $command,
+                'cwd' => null,
+                'exit_code' => null,
+                'stdout' => '',
+                'stderr' => $exception->getMessage(),
+            ];
+        }
+
+        $maxOutput = max(2000, (int) config('ai-assistant.quality.typescript_check_max_output_chars', 24000));
+
+        return [
+            'ok' => (bool) ($result['ok'] ?? false),
+            'command' => is_string($result['command'] ?? null) ? $result['command'] : $command,
+            'cwd' => is_string($result['cwd'] ?? null) ? $result['cwd'] : null,
+            'exit_code' => is_int($result['exit_code'] ?? null) ? $result['exit_code'] : null,
+            'stdout' => mb_substr((string) ($result['stdout'] ?? ''), 0, $maxOutput),
+            'stderr' => mb_substr((string) ($result['stderr'] ?? ''), 0, $maxOutput),
         ];
     }
 
@@ -976,11 +1181,41 @@ class AiAssistantService
                     'fallback_used' => $index > 0,
                 ];
             } catch (Throwable $exception) {
-                $errors[] = "{$model}: {$exception->getMessage()}";
+                $message = $exception->getMessage();
+                $errors[] = "{$model}: {$message}";
+
+                if ($this->isNonRecoverableModelError($message)) {
+                    break;
+                }
             }
         }
 
         throw new RuntimeException("All models failed during {$stage}. ".implode(' | ', $errors));
+    }
+
+    private function isNonRecoverableModelError(string $message): bool
+    {
+        $normalized = mb_strtolower($message);
+
+        if ($normalized === '') {
+            return false;
+        }
+
+        $needles = [
+            '429 too many requests',
+            'reached your session usage limit',
+            'server misbehaving',
+            'lookup ollama.com',
+            'dial tcp',
+        ];
+
+        foreach ($needles as $needle) {
+            if (str_contains($normalized, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function isToolCallPayloadPrefix(string $content): bool
@@ -1061,6 +1296,43 @@ class AiAssistantService
         return $clean !== ''
             ? $clean
             : 'I encountered an internal formatting issue while continuing. Please type "continue the previous implementation".';
+    }
+
+    private function thinkingForUi(string $content): ?string
+    {
+        if (! (bool) config('ai-assistant.ui.expose_thinking', false)) {
+            return null;
+        }
+
+        return $this->extractThinking($content);
+    }
+
+    private function extractThinking(string $content): ?string
+    {
+        $normalized = trim($content);
+
+        if ($normalized === '') {
+            return null;
+        }
+
+        if (preg_match_all('/<think>([\s\S]*?)<\/think>/i', $normalized, $matches) === false) {
+            return null;
+        }
+
+        if (! isset($matches[1]) || ! is_array($matches[1]) || $matches[1] === []) {
+            return null;
+        }
+
+        $segments = array_values(array_filter(array_map(
+            static fn ($segment): string => trim((string) $segment),
+            $matches[1]
+        ), static fn (string $segment): bool => $segment !== ''));
+
+        if ($segments === []) {
+            return null;
+        }
+
+        return implode("\n\n---\n\n", $segments);
     }
 
     private function looksLikeMalformedToolCallOutput(string $content): bool

@@ -1,6 +1,7 @@
 import { Head, usePage } from '@inertiajs/react';
 import {
     Bot,
+    ChevronDown,
     Code2,
     FileText,
     ImageIcon,
@@ -13,6 +14,11 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import {
+    Collapsible,
+    CollapsibleContent,
+    CollapsibleTrigger,
+} from '@/components/ui/collapsible';
 import AppLayout from '@/layouts/app-layout';
 import type { BreadcrumbItem } from '@/types';
 
@@ -30,6 +36,10 @@ type Message = {
     model?: string;
     fallbackUsed?: boolean;
     stage?: 'plan' | 'execution';
+    plan?: string;
+    planModel?: string;
+    thinking?: string;
+    planThinking?: string;
 };
 
 type AssistantMode = 'auto' | 'deep';
@@ -82,6 +92,10 @@ type StreamEvent =
           content: string;
       }
     | {
+          type: 'plan_chunk';
+          content: string;
+      }
+    | {
           type: 'heartbeat';
           status?: string;
       }
@@ -90,6 +104,10 @@ type StreamEvent =
           conversation_id?: number;
           model?: string;
           fallback_used?: boolean;
+          plan?: string | null;
+          plan_model?: string | null;
+          thinking?: string | null;
+          plan_thinking?: string | null;
           warnings?: string[];
       }
     | {
@@ -146,6 +164,7 @@ function streamStatusLabel(status: string | null, mode: AssistantMode): string {
             model_round_2: 'Second pass...',
             model_round_3: 'Refining response...',
             running_tools: 'Running tools...',
+            verifying_typescript: 'Running TypeScript checks...',
             finalizing: 'Finalizing...',
         }[status ?? ''] ?? 'Thinking...'
     );
@@ -179,8 +198,78 @@ function streamStatusDetail(status: string | null, mode: AssistantMode): string 
             model_round_3: 'Additional model pass in progress...',
             running_tools:
                 'Model requested file/code tools. Server is executing them now.',
+            verifying_typescript:
+                'Validating generated TypeScript before final response.',
             finalizing: 'Assembling final response for display...',
         }[status ?? ''] ?? 'Model is working...'
+    );
+}
+
+function AssistantDetails({
+    plan,
+    planModel,
+    thinking,
+    planThinking,
+}: {
+    plan?: string;
+    planModel?: string;
+    thinking?: string;
+    planThinking?: string;
+}) {
+    const hasPlan = typeof plan === 'string' && plan.trim() !== '';
+    const hasThinking = typeof thinking === 'string' && thinking.trim() !== '';
+    const hasPlanThinking =
+        typeof planThinking === 'string' && planThinking.trim() !== '';
+
+    if (!hasPlan && !hasThinking && !hasPlanThinking) {
+        return null;
+    }
+
+    return (
+        <Collapsible className="mt-2">
+            <CollapsibleTrigger asChild>
+                <button
+                    type="button"
+                    className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+                >
+                    <ChevronDown className="size-3 transition-transform data-[state=open]:rotate-180" />
+                    Details
+                </button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-2 space-y-2 rounded-md border bg-muted/30 p-2">
+                {hasPlan && (
+                    <div>
+                        <p className="text-[11px] font-medium text-muted-foreground">
+                            Planning
+                            {planModel ? ` · ${planModel}` : ''}
+                        </p>
+                        <p className="mt-1 whitespace-pre-wrap text-[12px]">
+                            {plan}
+                        </p>
+                    </div>
+                )}
+                {hasPlanThinking && (
+                    <div>
+                        <p className="text-[11px] font-medium text-muted-foreground">
+                            Plan Thinking
+                        </p>
+                        <p className="mt-1 whitespace-pre-wrap text-[12px]">
+                            {planThinking}
+                        </p>
+                    </div>
+                )}
+                {hasThinking && (
+                    <div>
+                        <p className="text-[11px] font-medium text-muted-foreground">
+                            Thinking
+                        </p>
+                        <p className="mt-1 whitespace-pre-wrap text-[12px]">
+                            {thinking}
+                        </p>
+                    </div>
+                )}
+            </CollapsibleContent>
+        </Collapsible>
     );
 }
 
@@ -253,6 +342,7 @@ export default function AIAssistant() {
     const [elapsedSeconds, setElapsedSeconds] = useState(0);
     const [streamedChars, setStreamedChars] = useState(0);
     const [toolActivity, setToolActivity] = useState<string[]>([]);
+    const [planningPreview, setPlanningPreview] = useState('');
     const [conversationId, setConversationId] = useState<number | null>(
         initialConversationId,
     );
@@ -320,6 +410,7 @@ export default function AIAssistant() {
         setElapsedSeconds(0);
         setStreamedChars(0);
         setToolActivity([]);
+        setPlanningPreview('');
         setIsSending(true);
 
         try {
@@ -381,6 +472,10 @@ export default function AIAssistant() {
                 let finalModel: string | undefined;
                 let finalFallbackUsed = false;
                 let finalWarnings: string[] = [];
+                let finalPlan: string | undefined;
+                let finalPlanModel: string | undefined;
+                let finalThinking: string | undefined;
+                let finalPlanThinking: string | undefined;
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -428,6 +523,11 @@ export default function AIAssistant() {
                             );
                         }
 
+                        if (event.type === 'plan_chunk') {
+                            setPlanningPreview((previous) => previous + event.content);
+                            setStreamedChars((previous) => previous + event.content.length);
+                        }
+
                         if (event.type === 'done') {
                             if (typeof event.conversation_id === 'number') {
                                 setConversationId(event.conversation_id);
@@ -447,6 +547,26 @@ export default function AIAssistant() {
                                           typeof warning === 'string',
                                   )
                                 : [];
+                            finalPlan =
+                                typeof event.plan === 'string' &&
+                                event.plan.trim() !== ''
+                                    ? event.plan
+                                    : undefined;
+                            finalPlanModel =
+                                typeof event.plan_model === 'string' &&
+                                event.plan_model.trim() !== ''
+                                    ? event.plan_model
+                                    : undefined;
+                            finalThinking =
+                                typeof event.thinking === 'string' &&
+                                event.thinking.trim() !== ''
+                                    ? event.thinking
+                                    : undefined;
+                            finalPlanThinking =
+                                typeof event.plan_thinking === 'string' &&
+                                event.plan_thinking.trim() !== ''
+                                    ? event.plan_thinking
+                                    : undefined;
                         }
 
                         if (event.type === 'tool_activity') {
@@ -550,6 +670,10 @@ export default function AIAssistant() {
                                   ...message,
                                   model: finalModel,
                                   fallbackUsed: finalFallbackUsed,
+                                  plan: finalPlan,
+                                  planModel: finalPlanModel,
+                                  thinking: finalThinking,
+                                  planThinking: finalPlanThinking,
                               }
                             : message,
                     ),
@@ -816,6 +940,14 @@ export default function AIAssistant() {
                                                             : ''}
                                                     </p>
                                                 )}
+                                            {message.role === 'assistant' && (
+                                                <AssistantDetails
+                                                    plan={message.plan}
+                                                    planModel={message.planModel}
+                                                    thinking={message.thinking}
+                                                    planThinking={message.planThinking}
+                                                />
+                                            )}
                                         </div>
                                     ))}
                                     {isSending && (
@@ -835,6 +967,17 @@ export default function AIAssistant() {
                                                     mode,
                                                 )}
                                             </p>
+                                            {mode === 'deep' &&
+                                                planningPreview.trim() !== '' && (
+                                                    <div className="mt-2 rounded-md border bg-muted/30 p-2">
+                                                        <p className="text-[11px] font-medium text-muted-foreground">
+                                                            Live Planning
+                                                        </p>
+                                                        <p className="mt-1 whitespace-pre-wrap text-[12px] text-muted-foreground">
+                                                            {planningPreview}
+                                                        </p>
+                                                    </div>
+                                                )}
                                             <p className="mt-1 text-[11px] text-muted-foreground">
                                                 Elapsed: {elapsedSeconds}s
                                                 {' · '}

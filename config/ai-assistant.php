@@ -51,9 +51,27 @@ return [
                         'php artisan,npm run,composer,git status,git diff,ls,cat,rg'
                     ))
                 ))),
+                'blocked_patterns' => array_values(array_filter(array_map(
+                    'trim',
+                    explode(',', (string) env(
+                        'AI_ASSISTANT_FS_SHELL_BLOCKED_PATTERNS',
+                        'php artisan migrate:fresh,php artisan migrate:refresh,php artisan db:wipe,php artisan schema:drop,php artisan migrate:reset'
+                    ))
+                ))),
                 'timeout_seconds' => (int) env('AI_ASSISTANT_FS_SHELL_TIMEOUT_SECONDS', 30),
                 'max_output_chars' => (int) env('AI_ASSISTANT_FS_SHELL_MAX_OUTPUT_CHARS', 12000),
             ],
         ],
+    ],
+
+    'quality' => [
+        'typescript_check_on_coding' => (bool) env('AI_ASSISTANT_TS_CHECK_ON_CODING', true),
+        'typescript_check_command' => (string) env('AI_ASSISTANT_TS_CHECK_COMMAND', 'npm run types -- --pretty false'),
+        'typescript_check_timeout_seconds' => (int) env('AI_ASSISTANT_TS_CHECK_TIMEOUT_SECONDS', 120),
+        'typescript_check_max_output_chars' => (int) env('AI_ASSISTANT_TS_CHECK_MAX_OUTPUT_CHARS', 24000),
+    ],
+
+    'ui' => [
+        'expose_thinking' => (bool) env('AI_ASSISTANT_UI_EXPOSE_THINKING', false),
     ],
 ];

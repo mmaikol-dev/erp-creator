@@ -10,3 +10,9 @@ declare module '@inertiajs/core' {
         };
     }
 }
+
+declare function route(
+    name: string,
+    parameters?: Record<string, unknown>,
+    absolute?: boolean,
+): string;
