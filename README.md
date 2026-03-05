@@ -12,6 +12,7 @@ This project is a Laravel + Inertia AI assistant with:
 - filesystem tools for read/write/edit/append/create/list operations
 - code search tool for symbol/usage discovery
 - optional shell tool (`run_shell`) with configurable command restrictions
+- optional Tavily-backed web search tool (`web_search`) with domain restrictions and citation-required responses
 - enforced TypeScript quality gate for coding/CRUD responses
 - canonical page template reference support for CRUD/page generation
 
@@ -141,7 +142,7 @@ This section describes the exact runtime process the assistant follows per reque
 ### Stage 4: Tool-call loop
 - Model output is parsed for strict JSON `tool_calls`.
 - Supported tools currently:
-  - `read_file`, `write_file`, `edit`, `append_file`, `create_directory`, `list_directory`, `search_code`, `run_shell`
+  - `read_file`, `write_file`, `edit`, `append_file`, `create_directory`, `list_directory`, `search_code`, `run_shell`, `web_search`
 - If calls are present:
   - tools execute server-side,
   - structured tool results are appended back into the next model round.
@@ -224,7 +225,7 @@ Responsibilities:
 Tool protocol (strict JSON from model):
 - `{"tool_calls":[{"tool":"read_file","arguments":{"path":"app/Http/Controllers/Foo.php"}}]}`
 - `{"tool_calls":[{"tool":"search_code","arguments":{"query":"AiAssistantController","path":"app"}}]}`
-- Supported tools: `read_file`, `write_file`, `edit`, `append_file`, `create_directory`, `list_directory`, `search_code`, `run_shell`
+- Supported tools: `read_file`, `write_file`, `edit`, `append_file`, `create_directory`, `list_directory`, `search_code`, `run_shell`, `web_search`
 - The assistant executes tool calls and feeds results back to the model for final response.
 
 Returns payload including:
@@ -264,12 +265,19 @@ Supported tools:
 - `list_directory`
 - `search_code`
 - `run_shell`
+- `web_search` (Tavily-backed; citation-required in final responses when used)
 
 `search_code` arguments:
 - `query` (string, required)
 - `path` (string, optional, defaults to project root)
 - `regex` (bool, optional, default false)
 - `case_sensitive` (bool, optional, default false)
+
+`web_search` arguments:
+- `query` (string, required)
+- `domains` (array|string, optional)
+- `recency_days` (int, optional)
+- `max_results` (int, optional)
 
 Config keys:
 - `AI_ASSISTANT_FS_TOOLS_ENABLED` (default `true`)
@@ -280,6 +288,10 @@ Config keys:
 - `AI_ASSISTANT_FS_MAX_TOOL_ROUNDS`
 - `AI_ASSISTANT_FS_MAX_SEARCH_RESULTS`
 - `AI_ASSISTANT_FS_MAX_SEARCH_FILE_BYTES`
+- `AI_ASSISTANT_WEB_SEARCH_ENABLED`
+- `AI_ASSISTANT_WEB_SEARCH_API_KEY`
+- `AI_ASSISTANT_WEB_SEARCH_ALLOWED_DOMAINS`
+- `AI_ASSISTANT_WEB_SEARCH_BLOCKED_DOMAINS`
 
 Important behavior:
 - `chatHistory` sends only the latest 20 messages to model input
@@ -368,6 +380,16 @@ Filesystem tool config:
   - `AI_ASSISTANT_FS_SHELL_BLOCKED_PATTERNS` (comma-separated hard blocklist; matched commands are always denied, even when `ALLOW_ANY_COMMAND=true`)
   - `AI_ASSISTANT_FS_SHELL_TIMEOUT_SECONDS` default `30`
   - `AI_ASSISTANT_FS_SHELL_MAX_OUTPUT_CHARS` default `12000`
+- web search tool config:
+  - `AI_ASSISTANT_WEB_SEARCH_ENABLED` default `false`
+  - `AI_ASSISTANT_WEB_SEARCH_API_KEY` (required when enabled)
+  - `AI_ASSISTANT_WEB_SEARCH_BASE_URL` default `https://api.tavily.com`
+  - `AI_ASSISTANT_WEB_SEARCH_ENDPOINT` default `/search`
+  - `AI_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS` default `20`
+  - `AI_ASSISTANT_WEB_SEARCH_MAX_RESULTS` default `5`
+  - `AI_ASSISTANT_WEB_SEARCH_ALLOWED_DOMAINS` (comma-separated allowlist; optional)
+  - `AI_ASSISTANT_WEB_SEARCH_BLOCKED_DOMAINS` (comma-separated denylist)
+  - `AI_ASSISTANT_WEB_SEARCH_REQUIRE_CITATIONS` default `true`
 
 Quality gate config:
 - `AI_ASSISTANT_TS_CHECK_ON_CODING` default `true`
@@ -499,3 +521,19 @@ Logged fields include:
 - Migrations:
   - `database/migrations/2026_02_28_000001_create_ai_conversations_table.php`
   - `database/migrations/2026_02_28_000002_create_ai_messages_table.php`
+
+## Laravel MCP vs Boost (in this project)
+
+- `laravel/mcp` is installed as protocol/server infrastructure.
+- `laravel/boost` is installed and currently used for runtime context enrichment.
+- Current architecture uses:
+  - Boost MCP tools for context (`Application Info`, `Route List`, `Artisan Commands`) via `BoostContextService`.
+  - Custom tool execution (`read_file`, `write_file`, `edit`, `append_file`, `create_directory`, `list_directory`, `search_code`, `run_shell`) via `FilesystemToolService`.
+- A custom MCP server route is not currently part of the active flow (`routes/ai.php` example remains commented).
+
+## UI component inventory (shadcn)
+
+- Project uses shadcn components under `resources/js/components/ui`.
+- The full current `registry:ui` component set has been added and type-checked successfully.
+- Existing project-specific component APIs were preserved; compatibility fixes were applied where necessary.
+- New dependencies were added to support the expanded shadcn component set (see `package.json` / `package-lock.json`).

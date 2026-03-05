@@ -13,6 +13,7 @@ return [
     ],
 
     'retrieval' => [
+        'enabled' => (bool) env('AI_ASSISTANT_RETRIEVAL_ENABLED', true),
         'max_chunks' => (int) env('AI_ASSISTANT_MAX_CONTEXT_CHUNKS', 4),
         'max_files' => (int) env('AI_ASSISTANT_MAX_INDEX_FILES', 40),
         'max_file_chars' => (int) env('AI_ASSISTANT_MAX_FILE_CHARS', 2400),
@@ -20,6 +21,7 @@ return [
         'chunk_overlap' => (int) env('AI_ASSISTANT_CHUNK_OVERLAP', 180),
         'cache_ttl' => (int) env('AI_ASSISTANT_INDEX_CACHE_TTL', 86400),
         'lazy_warm' => (bool) env('AI_ASSISTANT_RETRIEVAL_LAZY_WARM', false),
+        'lazy_warm_max_seconds' => (int) env('AI_ASSISTANT_RETRIEVAL_LAZY_WARM_MAX_SECONDS', 8),
         'paths' => [
             'app',
             'routes',
@@ -61,6 +63,26 @@ return [
                 'timeout_seconds' => (int) env('AI_ASSISTANT_FS_SHELL_TIMEOUT_SECONDS', 30),
                 'max_output_chars' => (int) env('AI_ASSISTANT_FS_SHELL_MAX_OUTPUT_CHARS', 12000),
             ],
+        ],
+        'web_search' => [
+            'enabled' => (bool) env('AI_ASSISTANT_WEB_SEARCH_ENABLED', false),
+            'api_key' => (string) env('AI_ASSISTANT_WEB_SEARCH_API_KEY', ''),
+            'base_url' => (string) env('AI_ASSISTANT_WEB_SEARCH_BASE_URL', 'https://api.tavily.com'),
+            'endpoint' => (string) env('AI_ASSISTANT_WEB_SEARCH_ENDPOINT', '/search'),
+            'timeout_seconds' => (int) env('AI_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS', 20),
+            'max_results' => (int) env('AI_ASSISTANT_WEB_SEARCH_MAX_RESULTS', 5),
+            'allowed_domains' => array_values(array_filter(array_map(
+                'trim',
+                explode(',', (string) env('AI_ASSISTANT_WEB_SEARCH_ALLOWED_DOMAINS', ''))
+            ))),
+            'blocked_domains' => array_values(array_filter(array_map(
+                'trim',
+                explode(',', (string) env(
+                    'AI_ASSISTANT_WEB_SEARCH_BLOCKED_DOMAINS',
+                    'localhost,127.0.0.1,0.0.0.0,169.254.169.254'
+                ))
+            ))),
+            'require_citations' => (bool) env('AI_ASSISTANT_WEB_SEARCH_REQUIRE_CITATIONS', true),
         ],
     ],
 

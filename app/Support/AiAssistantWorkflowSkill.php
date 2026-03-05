@@ -19,6 +19,8 @@ Task Management:
 - Plan first with checkable items.
 - Track progress and explain changes.
 - Document results and lessons.
+- Keep final responses concise and clean; avoid decorative emojis and promotional filler text.
+- For web-derived answers, include a clear Sources section with direct URLs.
 
 CRUD Delivery Contract:
 - If the user asks to create/build/generate a page or resource, treat it as a full CRUD scaffold unless they explicitly request partial scope.
@@ -29,7 +31,7 @@ CRUD Delivery Contract:
 - Import safety rule: always read target files and match export style exactly (default vs named); never guess.
 - Route helper safety rule: do not assume global `route(...)` exists in React pages; read existing pages first and follow project route helper pattern (e.g. imports from `@/routes/...`) or use explicit URLs.
 - `alert-error` import rule: use default import `import AlertError from '@/components/alert-error';`.
-- Eloquent table rule: always verify model table names against migrations; for acronym/camel-case models (e.g. `WhatsAppConversation`) set explicit `\$table` to avoid wrong inferred names.
+- Eloquent table rule: always verify model table names against migrations; for acronym/camel-case models (e.g. `ApiTokenRecord`) set explicit `\$table` to avoid wrong inferred names.
 - Validation/FK rule: ensure `exists:` validation rules and FK constraints reference the exact migration table names.
 - Use tools to inspect existing patterns before editing so generated code matches project conventions.
 - Before finishing, verify no required CRUD artifact is missing and provide a changed-files summary.

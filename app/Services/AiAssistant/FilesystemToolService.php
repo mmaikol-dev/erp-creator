@@ -3,6 +3,7 @@
 namespace App\Services\AiAssistant;
 
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Http;
 use RuntimeException;
 use Symfony\Component\Process\Exception\ProcessTimedOutException;
 use Symfony\Component\Process\Process;
@@ -38,6 +39,7 @@ class FilesystemToolService
             'list_directory' => $this->listDirectory($arguments),
             'search_code' => $this->searchCode($arguments),
             'run_shell' => $this->runShell($arguments),
+            'web_search' => $this->webSearch($arguments),
             default => throw new RuntimeException("Unknown tool: {$tool}"),
         };
     }
@@ -96,7 +98,7 @@ class FilesystemToolService
             'Filesystem tools are available.',
             'If you need a tool, output ONLY strict JSON in this exact shape and nothing else:',
             '{"tool_calls":[{"tool":"search_code","arguments":{"query":"AiAssistantController","path":"app"}}]}',
-            'Supported tool names: read_file, write_file, edit, append_file, create_directory, list_directory, search_code, run_shell.',
+            'Supported tool names: read_file, write_file, edit, append_file, create_directory, list_directory, search_code, run_shell, web_search.',
             'write_file arguments: path (string), content (string).',
             'edit arguments: path (string), either content (full replacement string) OR old_text + new_text.',
             'append_file arguments: path (string), content (string).',
@@ -104,6 +106,8 @@ class FilesystemToolService
             'list_directory arguments: path (string).',
             'search_code arguments: query (string), optional path (string), optional regex (bool), optional case_sensitive (bool).',
             'run_shell arguments: command (string), optional cwd/path (string), optional timeout_seconds (int).',
+            'web_search arguments: query (string), optional domains (array|string), optional recency_days (int), optional max_results (int).',
+            'When web_search is used, final user-facing response must include source links/citations.',
             "read_file will return up to {$maxRead} characters.",
             'If read_file returns exists=false, create the file with write_file instead of retrying read_file.',
             'For create-page/resource requests, keep using tools until routes, backend handlers, and frontend pages are all implemented.',
@@ -113,6 +117,21 @@ class FilesystemToolService
             'Never include raw tool_calls JSON in user-facing prose or markdown fences.',
             'Final answer must include a concise changed-files list.',
             'After tool results are returned, either provide final answer or request another tool call JSON.',
+        ]);
+    }
+
+    public function webSearchInstructions(): string
+    {
+        return implode("\n", [
+            'Web search tool is available for fresh/external information.',
+            'Use web_search only when internal/project context is insufficient or when the user asks for latest/current external facts.',
+            'Do not use web_search for local codebase questions that can be answered with project files/tools.',
+            'Do not guess recent facts; use web_search when freshness matters.',
+            'Use at most 1-2 focused searches, then answer directly.',
+            'If you need this tool, output ONLY strict JSON and nothing else:',
+            '{"tool_calls":[{"tool":"web_search","arguments":{"query":"latest Laravel 12 release notes","max_results":5}}]}',
+            'web_search arguments: query (string), optional domains (array|string), optional recency_days (int), optional max_results (int).',
+            'After using web_search, final user-facing response must include a Sources section with direct URLs.',
         ]);
     }
 
@@ -180,7 +199,7 @@ class FilesystemToolService
         }
 
         if ((! isset($arguments['query']) || ! is_string($arguments['query']) || trim($arguments['query']) === '')
-            && $tool === 'search_code'
+            && in_array($tool, ['search_code', 'web_search'], true)
         ) {
             if (isset($arguments['text']) && is_string($arguments['text']) && trim($arguments['text']) !== '') {
                 $arguments['query'] = $arguments['text'];
@@ -196,6 +215,14 @@ class FilesystemToolService
                 $arguments['command'] = $arguments['cmd'];
             } elseif (isset($arguments['script']) && is_string($arguments['script']) && trim($arguments['script']) !== '') {
                 $arguments['command'] = $arguments['script'];
+            }
+        }
+
+        if ($tool === 'web_search' && ! isset($arguments['domains'])) {
+            if (isset($arguments['domain']) && is_string($arguments['domain']) && trim($arguments['domain']) !== '') {
+                $arguments['domains'] = [trim($arguments['domain'])];
+            } elseif (isset($arguments['site']) && is_string($arguments['site']) && trim($arguments['site']) !== '') {
+                $arguments['domains'] = [trim($arguments['site'])];
             }
         }
 
@@ -597,6 +624,136 @@ class FilesystemToolService
 
     /**
      * @param  array<string, mixed>  $arguments
+     * @return array<string, mixed>
+     */
+    private function webSearch(array $arguments): array
+    {
+        if (! $this->enabled()) {
+            throw new RuntimeException('Filesystem tools are disabled.');
+        }
+
+        if (! (bool) config('ai-assistant.tools.web_search.enabled', false)) {
+            throw new RuntimeException('Web search tool is disabled.');
+        }
+
+        $apiKey = trim((string) config('ai-assistant.tools.web_search.api_key', ''));
+        if ($apiKey === '') {
+            throw new RuntimeException('Web search API key is missing.');
+        }
+
+        $query = $this->requireQuery($arguments);
+        $timeout = max(3, (int) config('ai-assistant.tools.web_search.timeout_seconds', 20));
+        $maxResults = max(1, (int) config('ai-assistant.tools.web_search.max_results', 5));
+        $baseUrl = rtrim((string) config('ai-assistant.tools.web_search.base_url', 'https://api.tavily.com'), '/');
+        $endpoint = (string) config('ai-assistant.tools.web_search.endpoint', '/search');
+
+        if (isset($arguments['max_results'])) {
+            $maxResults = min(10, max(1, (int) $arguments['max_results']));
+        }
+
+        /** @var list<string> $allowedDomains */
+        $allowedDomains = array_values(array_filter(array_map(
+            fn (mixed $domain): string => $this->normalizeDomain((string) $domain),
+            (array) config('ai-assistant.tools.web_search.allowed_domains', [])
+        )));
+
+        /** @var list<string> $blockedDomains */
+        $blockedDomains = array_values(array_filter(array_map(
+            fn (mixed $domain): string => $this->normalizeDomain((string) $domain),
+            (array) config('ai-assistant.tools.web_search.blocked_domains', [])
+        )));
+
+        $requestedDomains = $this->parseRequestedDomains($arguments['domains'] ?? null);
+        $includeDomains = $this->resolveIncludedDomains($requestedDomains, $allowedDomains);
+        $excludeDomains = $blockedDomains;
+
+        if ($requestedDomains !== [] && $allowedDomains !== [] && $includeDomains === []) {
+            throw new RuntimeException('Requested domains are not allowed by web search policy.');
+        }
+
+        $payload = [
+            'api_key' => $apiKey,
+            'query' => $query,
+            'max_results' => $maxResults,
+            'search_depth' => 'basic',
+            'include_answer' => false,
+            'include_raw_content' => false,
+        ];
+
+        if ($includeDomains !== []) {
+            $payload['include_domains'] = $includeDomains;
+        }
+
+        if ($excludeDomains !== []) {
+            $payload['exclude_domains'] = $excludeDomains;
+        }
+
+        if (isset($arguments['recency_days'])) {
+            $days = max(1, (int) $arguments['recency_days']);
+            $payload['time_range'] = $days <= 1 ? 'day' : ($days <= 7 ? 'week' : ($days <= 30 ? 'month' : 'year'));
+        }
+
+        $response = Http::acceptJson()
+            ->timeout($timeout)
+            ->post("{$baseUrl}{$endpoint}", $payload);
+
+        if ($response->failed()) {
+            $body = mb_substr(trim((string) $response->body()), 0, 600);
+            throw new RuntimeException("Web search request failed ({$response->status()}): {$body}");
+        }
+
+        /** @var array<string, mixed> $json */
+        $json = $response->json();
+        /** @var mixed $rawResults */
+        $rawResults = $json['results'] ?? [];
+
+        if (! is_array($rawResults)) {
+            $rawResults = [];
+        }
+
+        $results = [];
+
+        foreach ($rawResults as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+
+            $url = isset($row['url']) && is_string($row['url']) ? trim($row['url']) : '';
+            if ($url === '') {
+                continue;
+            }
+
+            $host = $this->extractHostFromUrl($url);
+            if ($host !== '' && $this->domainIsBlocked($host, $blockedDomains)) {
+                continue;
+            }
+
+            $results[] = [
+                'title' => isset($row['title']) && is_string($row['title']) ? trim($row['title']) : '',
+                'url' => $url,
+                'domain' => $host,
+                'snippet' => isset($row['content']) && is_string($row['content'])
+                    ? mb_substr(trim($row['content']), 0, 600)
+                    : '',
+                'score' => isset($row['score']) ? (float) $row['score'] : null,
+                'published_at' => isset($row['published_date']) && is_string($row['published_date'])
+                    ? $row['published_date']
+                    : null,
+            ];
+        }
+
+        return [
+            'tool' => 'web_search',
+            'query' => $query,
+            'include_domains' => $includeDomains,
+            'exclude_domains' => $excludeDomains,
+            'result_count' => count($results),
+            'results' => $results,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $arguments
      */
     private function requirePath(array $arguments): string
     {
@@ -798,6 +955,88 @@ class FilesystemToolService
     }
 
     /**
+     * @return list<string>
+     */
+    private function parseRequestedDomains(mixed $domains): array
+    {
+        if (is_string($domains)) {
+            $parts = preg_split('/[,\s]+/', $domains) ?: [];
+
+            return array_values(array_filter(array_map(
+                fn (string $part): string => $this->normalizeDomain($part),
+                $parts
+            )));
+        }
+
+        if (is_array($domains)) {
+            return array_values(array_filter(array_map(
+                fn (mixed $part): string => $this->normalizeDomain((string) $part),
+                $domains
+            )));
+        }
+
+        return [];
+    }
+
+    /**
+     * @param  list<string>  $requestedDomains
+     * @param  list<string>  $allowedDomains
+     * @return list<string>
+     */
+    private function resolveIncludedDomains(array $requestedDomains, array $allowedDomains): array
+    {
+        if ($requestedDomains === []) {
+            return $allowedDomains;
+        }
+
+        if ($allowedDomains === []) {
+            return $requestedDomains;
+        }
+
+        $allowedSet = array_fill_keys($allowedDomains, true);
+
+        return array_values(array_filter($requestedDomains, fn (string $domain): bool => isset($allowedSet[$domain])));
+    }
+
+    private function normalizeDomain(string $domain): string
+    {
+        $normalized = mb_strtolower(trim($domain));
+        $normalized = preg_replace('#^https?://#', '', $normalized) ?? $normalized;
+        $normalized = explode('/', $normalized)[0] ?? $normalized;
+
+        return trim($normalized);
+    }
+
+    private function extractHostFromUrl(string $url): string
+    {
+        $host = parse_url($url, PHP_URL_HOST);
+
+        if (! is_string($host) || trim($host) === '') {
+            return '';
+        }
+
+        return $this->normalizeDomain($host);
+    }
+
+    /**
+     * @param  list<string>  $blockedDomains
+     */
+    private function domainIsBlocked(string $domain, array $blockedDomains): bool
+    {
+        if ($domain === '') {
+            return false;
+        }
+
+        foreach ($blockedDomains as $blocked) {
+            if ($blocked !== '' && ($domain === $blocked || str_ends_with($domain, '.'.$blocked))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * @return array<string, mixed>|null
      */
     private function decodeJsonPayload(string $payload): ?array
@@ -844,7 +1083,46 @@ class FilesystemToolService
             }
         }
 
+        $recovered = $this->recoverLikelyToolCallJson($trimmed);
+
+        if (is_array($recovered)) {
+            return $recovered;
+        }
+
         return $this->extractJsonObjectWithToolCalls($trimmed);
+    }
+
+    /**
+     * Attempt to recover near-valid tool payloads (for example missing final "}" on outer object).
+     *
+     * @return array<string, mixed>|null
+     */
+    private function recoverLikelyToolCallJson(string $payload): ?array
+    {
+        $candidate = trim($payload);
+
+        if ($candidate === '') {
+            return null;
+        }
+
+        // Common malformed output: starts as {"tool_calls": ... ] but misses final outer brace.
+        if (preg_match('/^\{\s*"tool_calls"\s*:/', $candidate) === 1) {
+            $openBraces = substr_count($candidate, '{');
+            $closeBraces = substr_count($candidate, '}');
+
+            if ($openBraces > $closeBraces) {
+                $candidate .= str_repeat('}', $openBraces - $closeBraces);
+            }
+
+            /** @var mixed $decoded */
+            $decoded = json_decode($candidate, true);
+
+            if (is_array($decoded) && array_key_exists('tool_calls', $decoded)) {
+                return $decoded;
+            }
+        }
+
+        return null;
     }
 
     /**

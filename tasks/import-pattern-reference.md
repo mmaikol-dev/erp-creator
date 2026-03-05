@@ -28,6 +28,6 @@ Examples:
   - `import { login } from '@/routes';`
   - `href={login()}`
 - Valid explicit URL usage:
-  - `href=\"/support-tickets/create\"`
+  - `href=\"/records/create\"`
 - Invalid unsafe usage:
-  - `href={route('support-tickets.create')}` (unless project confirms global route function is wired)
+  - `href={route('records.create')}` (unless project confirms global route function is wired)

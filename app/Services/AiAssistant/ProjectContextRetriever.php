@@ -19,6 +19,13 @@ class ProjectContextRetriever
      */
     public function retrieve(string $query): array
     {
+        if (! (bool) config('ai-assistant.retrieval.enabled', true)) {
+            return [
+                'chunks' => [],
+                'warnings' => ['Retrieval is disabled by configuration.'],
+            ];
+        }
+
         $embeddingModel = (string) config('ai-assistant.models.embedding');
 
         try {
@@ -37,8 +44,10 @@ class ProjectContextRetriever
             $lazyWarm = (bool) config('ai-assistant.retrieval.lazy_warm', true);
 
             if ($lazyWarm && $this->shouldLazyWarmForQuery($query)) {
+                $lazyWarmMaxSeconds = max(1, (int) config('ai-assistant.retrieval.lazy_warm_max_seconds', 8));
+
                 try {
-                    $this->warmIndex();
+                    $this->warmIndex(false, $lazyWarmMaxSeconds);
                     $index = $this->cachedIndexOnly();
 
                     if ($index !== []) {
@@ -90,7 +99,7 @@ class ProjectContextRetriever
      *
      * @return array{cache_key: string, entries: int, files: int, chunks: int}
      */
-    public function warmIndex(bool $force = false): array
+    public function warmIndex(bool $force = false, ?int $maxDurationSeconds = null): array
     {
         $cacheKey = $this->cacheKey();
 
@@ -116,8 +125,16 @@ class ProjectContextRetriever
         $index = [];
         $filesWithChunks = 0;
         $chunks = 0;
+        $startedAt = microtime(true);
+        $timeBudget = is_int($maxDurationSeconds) ? max(1, $maxDurationSeconds) : null;
+        $timedOut = false;
 
         foreach ($sourceFiles as $relativePath) {
+            if ($timeBudget !== null && (microtime(true) - $startedAt) >= $timeBudget) {
+                $timedOut = true;
+                break;
+            }
+
             $absolutePath = base_path($relativePath);
 
             if (! File::exists($absolutePath) || File::isDirectory($absolutePath)) {
@@ -134,6 +151,11 @@ class ProjectContextRetriever
             $hadChunk = false;
 
             foreach ($fileChunks as $chunkContent) {
+                if ($timeBudget !== null && (microtime(true) - $startedAt) >= $timeBudget) {
+                    $timedOut = true;
+                    break;
+                }
+
                 try {
                     $vector = $this->ollama->embedding($embeddingModel, $chunkContent);
                 } catch (Throwable) {
@@ -156,6 +178,10 @@ class ProjectContextRetriever
             if ($hadChunk) {
                 $filesWithChunks++;
             }
+        }
+
+        if ($timedOut && $index === []) {
+            throw new RuntimeException("Retrieval warm timed out after {$timeBudget}s before indexing any entries.");
         }
 
         if ($index === []) {

@@ -10,8 +10,10 @@ import {
     Paperclip,
     Plus,
     Send,
+    Square,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
@@ -139,6 +141,11 @@ type AssistantPageProps = {
     conversations?: ConversationSummary[];
 };
 
+type FormattedBlock =
+    | { type: 'h1' | 'h2' | 'h3' | 'p' | 'quote'; lines: string[] }
+    | { type: 'ul' | 'ol'; items: string[] }
+    | { type: 'code'; lines: string[] };
+
 const FAST_MODE_TIMEOUT_MS = 600000;
 const DEEP_MODE_TIMEOUT_MS = 900000;
 
@@ -147,8 +154,12 @@ function streamStatusLabel(status: string | null, mode: AssistantMode): string {
         return (
             {
                 starting: 'Deep mode: starting...',
+                building_context: 'Deep mode: building context...',
+                retrieving_context: 'Deep mode: retrieving context...',
                 planning: 'Deep mode: planning...',
                 executing: 'Deep mode: executing...',
+                running_tools: 'Deep mode: running tools...',
+                verifying_typescript: 'Deep mode: verifying TypeScript...',
                 finalizing: 'Deep mode: finalizing...',
             }[status ?? ''] ?? 'Deep mode: planning and executing...'
         );
@@ -175,10 +186,18 @@ function streamStatusDetail(status: string | null, mode: AssistantMode): string 
         return (
             {
                 starting: 'Preparing deep-mode context.',
+                building_context:
+                    'Collecting app/framework context before planning.',
+                retrieving_context:
+                    'Retrieving indexed project context (time-limited).',
                 planning:
                     'Running planning stage before code generation. This can take longer.',
                 executing:
                     'Running execution stage based on the plan.',
+                running_tools:
+                    'Executing requested tools for implementation.',
+                verifying_typescript:
+                    'Validating generated TypeScript before final response.',
                 finalizing: 'Saving and returning final deep-mode response.',
             }[status ?? ''] ??
             'Deep mode runs a planning stage before execution, so this can take longer.'
@@ -315,6 +334,276 @@ function parseApiError(response: Response, payload: unknown): string {
     return 'The assistant did not return a response.';
 }
 
+function renderInlineText(text: string, keyPrefix: string) {
+    const pattern =
+        /(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*([^*]+)\*\*|`([^`]+)`)/g;
+    const nodes: ReactNode[] = [];
+    let cursor = 0;
+    let match: RegExpExecArray | null = null;
+    let index = 0;
+
+    while ((match = pattern.exec(text)) !== null) {
+        if (match.index > cursor) {
+            nodes.push(text.slice(cursor, match.index));
+        }
+
+        if (match[2] && match[3]) {
+            nodes.push(
+                <a
+                    key={`${keyPrefix}-link-${index}`}
+                    href={match[3]}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-medium text-primary underline underline-offset-2"
+                >
+                    {match[2]}
+                </a>,
+            );
+        } else if (match[4]) {
+            nodes.push(
+                <strong key={`${keyPrefix}-strong-${index}`} className="font-semibold">
+                    {match[4]}
+                </strong>,
+            );
+        } else if (match[5]) {
+            nodes.push(
+                <code
+                    key={`${keyPrefix}-code-${index}`}
+                    className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.92em]"
+                >
+                    {match[5]}
+                </code>,
+            );
+        }
+
+        cursor = pattern.lastIndex;
+        index++;
+    }
+
+    if (cursor < text.length) {
+        nodes.push(text.slice(cursor));
+    }
+
+    return nodes;
+}
+
+function buildFormattedBlocks(content: string): FormattedBlock[] {
+    const blocks: FormattedBlock[] = [];
+    const lines = content.replace(/\r\n/g, '\n').split('\n');
+
+    let inCode = false;
+    let codeLines: string[] = [];
+    let activeParagraph: string[] = [];
+    let activeQuote: string[] = [];
+    let activeListType: 'ul' | 'ol' | null = null;
+    let activeListItems: string[] = [];
+
+    const flushParagraph = () => {
+        if (activeParagraph.length > 0) {
+            blocks.push({ type: 'p', lines: [activeParagraph.join(' ')] });
+            activeParagraph = [];
+        }
+    };
+
+    const flushQuote = () => {
+        if (activeQuote.length > 0) {
+            blocks.push({ type: 'quote', lines: [activeQuote.join(' ')] });
+            activeQuote = [];
+        }
+    };
+
+    const flushList = () => {
+        if (activeListType !== null && activeListItems.length > 0) {
+            blocks.push({ type: activeListType, items: activeListItems });
+        }
+        activeListType = null;
+        activeListItems = [];
+    };
+
+    for (const rawLine of lines) {
+        const line = rawLine.trimEnd();
+        const trimmed = line.trim();
+
+        if (trimmed.startsWith('```')) {
+            flushParagraph();
+            flushQuote();
+            flushList();
+
+            if (!inCode) {
+                inCode = true;
+                codeLines = [];
+            } else {
+                inCode = false;
+                blocks.push({ type: 'code', lines: codeLines });
+                codeLines = [];
+            }
+            continue;
+        }
+
+        if (inCode) {
+            codeLines.push(rawLine);
+            continue;
+        }
+
+        if (trimmed === '') {
+            flushParagraph();
+            flushQuote();
+            flushList();
+            continue;
+        }
+
+        const headingMatch = trimmed.match(/^(#{1,3})\s+(.*)$/);
+        if (headingMatch) {
+            flushParagraph();
+            flushQuote();
+            flushList();
+
+            const hashes = headingMatch[1].length;
+            const headingText = headingMatch[2].trim();
+            const type = hashes === 1 ? 'h1' : hashes === 2 ? 'h2' : 'h3';
+            blocks.push({ type, lines: [headingText] });
+            continue;
+        }
+
+        if (trimmed.startsWith('> ')) {
+            flushParagraph();
+            flushList();
+            activeQuote.push(trimmed.slice(2).trim());
+            continue;
+        }
+
+        const unorderedMatch = trimmed.match(/^[-*]\s+(.*)$/);
+        if (unorderedMatch) {
+            flushParagraph();
+            flushQuote();
+            if (activeListType !== 'ul') {
+                flushList();
+                activeListType = 'ul';
+            }
+            activeListItems.push(unorderedMatch[1].trim());
+            continue;
+        }
+
+        const orderedMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+        if (orderedMatch) {
+            flushParagraph();
+            flushQuote();
+            if (activeListType !== 'ol') {
+                flushList();
+                activeListType = 'ol';
+            }
+            activeListItems.push(orderedMatch[1].trim());
+            continue;
+        }
+
+        flushQuote();
+        flushList();
+        activeParagraph.push(trimmed);
+    }
+
+    if (inCode && codeLines.length > 0) {
+        blocks.push({ type: 'code', lines: codeLines });
+    }
+
+    flushParagraph();
+    flushQuote();
+    flushList();
+
+    return blocks;
+}
+
+function FormattedAssistantMessage({ content }: { content: string }) {
+    const blocks = useMemo(() => buildFormattedBlocks(content), [content]);
+
+    if (blocks.length === 0) {
+        return <p className="whitespace-pre-wrap">{content}</p>;
+    }
+
+    return (
+        <div className="space-y-2.5 leading-7">
+            {blocks.map((block, blockIndex) => {
+                const key = `assistant-block-${blockIndex}`;
+
+                if (block.type === 'h1') {
+                    return (
+                        <h2 key={key} className="mt-1 text-base font-semibold tracking-tight">
+                            {renderInlineText(block.lines[0] ?? '', key)}
+                        </h2>
+                    );
+                }
+
+                if (block.type === 'h2') {
+                    return (
+                        <h3 key={key} className="mt-1 text-[15px] font-semibold">
+                            {renderInlineText(block.lines[0] ?? '', key)}
+                        </h3>
+                    );
+                }
+
+                if (block.type === 'h3') {
+                    return (
+                        <h4 key={key} className="mt-1 text-sm font-semibold text-foreground/95">
+                            {renderInlineText(block.lines[0] ?? '', key)}
+                        </h4>
+                    );
+                }
+
+                if (block.type === 'quote') {
+                    return (
+                        <blockquote
+                            key={key}
+                            className="rounded-r-md border-l-2 border-muted-foreground/30 bg-muted/30 px-3 py-1.5 text-muted-foreground"
+                        >
+                            {renderInlineText(block.lines[0] ?? '', key)}
+                        </blockquote>
+                    );
+                }
+
+                if (block.type === 'code') {
+                    return (
+                        <pre
+                            key={key}
+                            className="overflow-x-auto rounded-md border bg-muted/40 p-3 font-mono text-[12px] leading-5"
+                        >
+                            <code>{block.lines.join('\n')}</code>
+                        </pre>
+                    );
+                }
+
+                if (block.type === 'ul' || block.type === 'ol') {
+                    const ListTag = block.type === 'ul' ? 'ul' : 'ol';
+                    return (
+                        <ListTag
+                            key={key}
+                            className={
+                                block.type === 'ul'
+                                    ? 'ml-5 list-disc space-y-1.5'
+                                    : 'ml-5 list-decimal space-y-1.5'
+                            }
+                        >
+                            {block.items.map((item, itemIndex) => (
+                                <li key={`${key}-item-${itemIndex}`}>
+                                    {renderInlineText(item, `${key}-${itemIndex}`)}
+                                </li>
+                            ))}
+                        </ListTag>
+                    );
+                }
+
+                if (block.type === 'p') {
+                    return (
+                        <p key={key}>
+                            {renderInlineText(block.lines[0] ?? '', `${key}-p`)}
+                        </p>
+                    );
+                }
+
+                return null;
+            })}
+        </div>
+    );
+}
+
 export default function AIAssistant() {
     const page = usePage<AssistantPageProps>();
     const initialConversationId = page.props.conversationId ?? null;
@@ -348,6 +637,8 @@ export default function AIAssistant() {
     );
     const [conversations, setConversations] =
         useState<ConversationSummary[]>(initialConversations);
+    const activeRequestControllerRef = useRef<AbortController | null>(null);
+    const userCancelledRef = useRef(false);
 
     const suggestions = [
         { title: 'Plan Laravel auth flow', icon: FileText },
@@ -415,6 +706,8 @@ export default function AIAssistant() {
 
         try {
             const controller = new AbortController();
+            activeRequestControllerRef.current = controller;
+            userCancelledRef.current = false;
             const requestTimeoutMs =
                 mode === 'deep'
                     ? DEEP_MODE_TIMEOUT_MS
@@ -683,7 +976,9 @@ export default function AIAssistant() {
         } catch (error) {
             const message =
                 error instanceof DOMException && error.name === 'AbortError'
-                    ? `Request timed out after ${Math.floor((mode === 'deep' ? DEEP_MODE_TIMEOUT_MS : FAST_MODE_TIMEOUT_MS) / 1000)} seconds. ${mode === 'deep' ? 'Deep mode runs two model passes and can take longer; try Fast mode for quicker replies.' : 'The server/model is still taking too long; check Ollama/server health and try again.'}`
+                    ? userCancelledRef.current
+                        ? 'Request stopped.'
+                        : `Request timed out after ${Math.floor((mode === 'deep' ? DEEP_MODE_TIMEOUT_MS : FAST_MODE_TIMEOUT_MS) / 1000)} seconds. ${mode === 'deep' ? 'Deep mode runs two model passes and can take longer; try Fast mode for quicker replies.' : 'The server/model is still taking too long; check Ollama/server health and try again.'}`
                     : error instanceof Error
                       ? error.message
                       : 'Unexpected assistant error.';
@@ -697,9 +992,20 @@ export default function AIAssistant() {
                 },
             ]);
         } finally {
+            activeRequestControllerRef.current = null;
+            userCancelledRef.current = false;
             setStreamStatus(null);
             setIsSending(false);
         }
+    };
+
+    const stopActiveRequest = () => {
+        if (!isSending) {
+            return;
+        }
+
+        userCancelledRef.current = true;
+        activeRequestControllerRef.current?.abort();
     };
 
     const startNewChat = async () => {
@@ -922,9 +1228,15 @@ export default function AIAssistant() {
                                                     : 'mr-auto max-w-[90%] rounded-xl border bg-background px-3 py-2 text-sm'
                                             }
                                         >
-                                            <p className="whitespace-pre-wrap">
-                                                {message.content}
-                                            </p>
+                                            {message.role === 'assistant' ? (
+                                                <FormattedAssistantMessage
+                                                    content={message.content}
+                                                />
+                                            ) : (
+                                                <p className="whitespace-pre-wrap">
+                                                    {message.content}
+                                                </p>
+                                            )}
                                             {message.role === 'assistant' &&
                                                 message.model && (
                                                     <p className="mt-2 text-[11px] text-muted-foreground">
@@ -1085,18 +1397,29 @@ export default function AIAssistant() {
                                             placeholder="Ask about your Laravel project..."
                                             className="border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring/50 min-h-24 w-full resize-none rounded-md border px-3 py-2 pr-12 text-sm shadow-xs outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
                                         />
-                                        <Button
-                                            size="icon"
-                                            type="submit"
-                                            className="absolute right-2 bottom-2 size-9"
-                                            disabled={
-                                                isSending ||
-                                                isCreatingConversation ||
-                                                switchingConversationId !== null
-                                            }
-                                        >
-                                            <Send className="size-4" />
-                                        </Button>
+                                        {isSending ? (
+                                            <Button
+                                                size="icon"
+                                                type="button"
+                                                variant="destructive"
+                                                className="absolute right-2 bottom-2 size-9"
+                                                onClick={stopActiveRequest}
+                                            >
+                                                <Square className="size-4" />
+                                            </Button>
+                                        ) : (
+                                            <Button
+                                                size="icon"
+                                                type="submit"
+                                                className="absolute right-2 bottom-2 size-9"
+                                                disabled={
+                                                    isCreatingConversation ||
+                                                    switchingConversationId !== null
+                                                }
+                                            >
+                                                <Send className="size-4" />
+                                            </Button>
+                                        )}
                                     </form>
                                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
                                         <div className="flex items-center gap-3">

@@ -136,10 +136,6 @@ class AiAssistantService
         }
 
         if ($mode === 'deep') {
-            if ($onStatus !== null) {
-                $onStatus('planning');
-            }
-
             $result = $this->respondInDeepMode(
                 $message,
                 $history,
@@ -259,9 +255,20 @@ class AiAssistantService
             '- Coding and execution primary model: qwen3-coder-next:cloud',
             '- Embeddings model for retrieval: qwen3-embedding:0.6b',
             'Use the provided project context directly and avoid guessing framework structure.',
+            'Response style contract:',
+            '- Keep final responses concise, clean, and practical.',
+            '- Avoid decorative emojis, hype language, and marketing-style closers.',
+            '- Prefer short bullets over long narrative paragraphs.',
+            '- When web_search is used, include a final "Sources" section with plain URL citations.',
             'Follow this skill rigorously:',
             AiAssistantWorkflowSkill::text(),
         ];
+
+        if ((bool) config('ai-assistant.tools.web_search.enabled', false)
+            && $this->shouldEnableWebSearchInstructions($message, $intent)
+        ) {
+            $systemPrompt[] = $this->filesystemTools->webSearchInstructions();
+        }
 
         if ($this->shouldEnableFilesystemTools($message, $intent, $executionPlan)) {
             $systemPrompt[] = $this->filesystemTools->toolInstructions();
@@ -604,11 +611,21 @@ class AiAssistantService
         ];
 
         $warnings = [];
+        if ($onStatus !== null) {
+            $onStatus('building_context');
+        }
         $boost = $this->boostContext->buildContext();
         $warnings = [...$warnings, ...$boost['warnings']];
 
+        if ($onStatus !== null) {
+            $onStatus('retrieving_context');
+        }
         $retrieval = $this->retriever->retrieve($message);
         $warnings = [...$warnings, ...$retrieval['warnings']];
+
+        if ($onStatus !== null) {
+            $onStatus('planning');
+        }
 
         $planningPrompt = "Create a concise execution plan for this request before coding:\n{$message}";
         $planMessages = $this->buildMessages(
@@ -622,11 +639,25 @@ class AiAssistantService
         );
 
         try {
+            $planningWasStreamed = false;
+            $planningChunkHandler = null;
+
+            if ($onPlanChunk !== null) {
+                $planningChunkHandler = function (string $delta) use ($onPlanChunk, &$planningWasStreamed): void {
+                    if (trim($delta) === '') {
+                        return;
+                    }
+
+                    $planningWasStreamed = true;
+                    $onPlanChunk($delta);
+                };
+            }
+
             $planResult = $this->chatWithFallback(
                 [$models['planning']],
                 $planMessages,
                 'planning stage',
-                null,
+                $planningChunkHandler,
             );
         } catch (Throwable $planningException) {
             $warnings[] = 'Deep mode planning failed; continuing execution with a minimal fallback plan.';
@@ -635,12 +666,13 @@ class AiAssistantService
                 'model' => 'system:planning-fallback',
                 'fallback_used' => false,
             ];
+            $planningWasStreamed = false;
         }
 
         if ($onPlanChunk !== null) {
             $planPreview = $this->sanitizeAssistantOutput($planResult['content']);
 
-            if (trim($planPreview) !== '') {
+            if (! $planningWasStreamed && trim($planPreview) !== '') {
                 $onPlanChunk($planPreview);
             }
         }
@@ -711,12 +743,19 @@ class AiAssistantService
         $toolWarnings = [];
         $fallbackUsed = false;
         $configuredMaxToolRounds = (int) config('ai-assistant.tools.filesystem.max_tool_rounds', 8);
+        $hardToolRoundCap = max(4, (int) config('ai-assistant.tools.filesystem.max_tool_rounds_hard_cap', 24));
         $unboundedToolRounds = $configuredMaxToolRounds <= 0;
-        $maxToolRounds = $unboundedToolRounds ? 0 : max(1, $configuredMaxToolRounds);
+        $maxToolRounds = $unboundedToolRounds
+            ? $hardToolRoundCap
+            : max(1, min($configuredMaxToolRounds, $hardToolRoundCap));
         $currentMessages = $messages;
         $crudRequest = $this->isCrudRequestFromMessages($messages);
         $requireTypecheck = $this->shouldRunTypeScriptCheck($messages, $crudRequest);
         $typecheckAttempted = false;
+        $citationRetryAttempted = false;
+        $webSearchUsed = false;
+        $webSearchCallsExecuted = 0;
+        $maxWebSearchCallsPerRequest = max(1, (int) config('ai-assistant.tools.web_search.max_calls_per_request', 2));
         $toolCallSignatures = [];
         $lastToolNames = [];
 
@@ -758,8 +797,14 @@ class AiAssistantService
             }
         }
 
+        if ($unboundedToolRounds) {
+            $toolWarnings[] = "Configured tool rounds were unbounded; applying hard safety cap of {$hardToolRoundCap} rounds.";
+        } elseif ($configuredMaxToolRounds > $hardToolRoundCap) {
+            $toolWarnings[] = "Configured tool rounds ({$configuredMaxToolRounds}) exceed hard cap; using {$hardToolRoundCap}.";
+        }
+
         $round = 0;
-        while ($unboundedToolRounds || $round < $maxToolRounds) {
+        while ($round < $maxToolRounds) {
             $round++;
             if ($onStatus !== null) {
                 $onStatus("model_round_{$round}");
@@ -866,6 +911,26 @@ class AiAssistantService
                     }
                 }
 
+                if ($webSearchUsed
+                    && (bool) config('ai-assistant.tools.web_search.require_citations', true)
+                    && ! $citationRetryAttempted
+                    && ! $this->responseIncludesCitationLinks($result['content'])
+                ) {
+                    $citationRetryAttempted = true;
+                    $toolWarnings[] = 'Web search was used but final answer had no source links; requesting citation-complete rewrite.';
+                    $currentMessages[] = [
+                        'role' => 'assistant',
+                        'content' => $result['content'],
+                    ];
+                    $currentMessages[] = [
+                        'role' => 'user',
+                        'content' => 'You used web_search results. Rewrite your final answer in a clean concise format, '.
+                            'without decorative emojis or promotional text, and include a final "Sources" section with clickable URLs for key claims.',
+                    ];
+
+                    continue;
+                }
+
                 return [
                     ...$result,
                     'fallback_used' => $fallbackUsed,
@@ -881,6 +946,7 @@ class AiAssistantService
                 fn (array $call): string => (string) ($call['tool'] ?? 'unknown'),
                 $calls
             )));
+            $webSearchUsed = $webSearchUsed || in_array('web_search', $lastToolNames, true);
 
             if ($onToolActivity !== null) {
                 $onToolActivity([
@@ -917,7 +983,25 @@ class AiAssistantService
             $toolResults = [];
 
             foreach ($calls as $index => $call) {
+                $callTool = (string) ($call['tool'] ?? '');
+
+                if ($callTool === 'web_search' && $webSearchCallsExecuted >= $maxWebSearchCallsPerRequest) {
+                    $toolWarnings[] = "web_search call limit reached ({$maxWebSearchCallsPerRequest} per request).";
+                    $toolResults[] = [
+                        'index' => $index,
+                        'ok' => false,
+                        'call' => $call,
+                        'error' => "web_search call limit reached ({$maxWebSearchCallsPerRequest} per request). Continue with existing results.",
+                    ];
+
+                    continue;
+                }
+
                 try {
+                    if ($callTool === 'web_search') {
+                        $webSearchCallsExecuted++;
+                    }
+
                     $toolResults[] = [
                         'index' => $index,
                         'ok' => true,
@@ -1070,6 +1154,7 @@ class AiAssistantService
                 'tool' => $tool,
                 'path' => $path,
                 'query' => $query,
+                'domains' => isset($arguments['domains']) ? $arguments['domains'] : null,
             ];
         }, $calls));
     }
@@ -1221,6 +1306,11 @@ class AiAssistantService
     private function isToolCallPayloadPrefix(string $content): bool
     {
         return preg_match('/^\{\s*"tool_calls"\s*:/', $content) === 1;
+    }
+
+    private function responseIncludesCitationLinks(string $content): bool
+    {
+        return preg_match('/https?:\/\/[^\s\])}<>"]+/i', $content) === 1;
     }
 
     /**
@@ -1400,6 +1490,47 @@ class AiAssistantService
         }
 
         return preg_match('/^(hi+|hello+|hey+|heyy+|yo+|sup+|hola+|good (morning|afternoon|evening))([!.?,\s]*)$/', $normalized) === 1;
+    }
+
+    private function shouldEnableWebSearchInstructions(string $message, string $intent): bool
+    {
+        if (! (bool) config('ai-assistant.tools.web_search.enabled', false)) {
+            return false;
+        }
+
+        // Keep coding flows focused on local tools/files unless explicitly requested.
+        if ($intent === 'coding') {
+            return false;
+        }
+
+        $normalized = mb_strtolower(trim($message));
+
+        if ($normalized === '') {
+            return false;
+        }
+
+        $webSignals = [
+            'latest',
+            'current',
+            'today',
+            'news',
+            'price',
+            'pricing',
+            'compare',
+            'official docs',
+            'documentation',
+            'search web',
+            'look it up',
+            'web search',
+        ];
+
+        foreach ($webSignals as $signal) {
+            if (str_contains($normalized, $signal)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
