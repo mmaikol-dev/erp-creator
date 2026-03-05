@@ -178,6 +178,11 @@ Defined in `routes/web.php` under `auth` + `verified` middleware:
 - `GET /ai-assistant/conversations/{conversation}` -> `AiAssistantController::showConversation`
 - `POST /ai-assistant/chat` -> `AiAssistantController::chat`
 - `POST /ai-assistant/chat/stream` -> `AiAssistantController::chatStream`
+- `POST /ai-assistant/task-runs` -> `AiAssistantController::createTaskRun`
+- `GET /ai-assistant/task-runs/{taskRun}` -> `AiAssistantController::showTaskRun`
+- `POST /ai-assistant/task-runs/{taskRun}/next` -> `AiAssistantController::runNextTaskStep`
+- `POST /ai-assistant/task-runs/{taskRun}/pause` -> `AiAssistantController::pauseTaskRun`
+- `POST /ai-assistant/task-runs/{taskRun}/resume` -> `AiAssistantController::resumeTaskRun`
 
 ## Frontend behavior
 
@@ -247,6 +252,15 @@ Responsibilities:
 - build chat history window for model input
 - compute relevant memory snippets with cosine similarity over stored message embeddings
 - persist messages and per-message embeddings
+
+### `TaskRunService`
+
+Responsibilities:
+- create persisted step-based plans (`ai_task_runs`) from a high-level goal
+- execute one step at a time (`run next step`)
+- pause/resume long-running task orchestration safely
+- run mandatory review gate per step (`pass|partial|fail`) before advancing
+- keep plan state, current step, and review notes synchronized for UI resume/continue
 
 ### `FilesystemToolService`
 
@@ -421,6 +435,18 @@ UI config:
 - timestamps
 - index on (`ai_conversation_id`, `created_at`)
 
+### `ai_task_runs`
+- `id`
+- `ai_conversation_id` (FK `ai_conversations.id`, cascade delete)
+- `goal` string
+- `status` string (`ready|running|paused|needs_review_fix|completed`)
+- `current_step_index` unsigned integer
+- `plan` JSON (step list + per-step status/review metadata)
+- `meta` JSON
+- `paused_at` nullable timestamp
+- `completed_at` nullable timestamp
+- timestamps
+
 ## Validation and security
 
 Request validation (`AiAssistantChatRequest`):
@@ -508,10 +534,13 @@ Logged fields include:
 - Models:
   - `app/Models/AiConversation.php`
   - `app/Models/AiMessage.php`
+  - `app/Models/AiTaskRun.php`
 - Routes:
   - `routes/web.php`
 - Frontend page:
   - `resources/js/pages/ai-assistant.tsx`
+- Task orchestration service:
+  - `app/Services/AiAssistant/TaskRunService.php`
 - Page template reference:
   - `tasks/page-template-reference.md`
   - `tasks/import-pattern-reference.md`
@@ -521,6 +550,7 @@ Logged fields include:
 - Migrations:
   - `database/migrations/2026_02_28_000001_create_ai_conversations_table.php`
   - `database/migrations/2026_02_28_000002_create_ai_messages_table.php`
+  - `database/migrations/2026_03_05_000001_create_ai_task_runs_table.php`
 
 ## Laravel MCP vs Boost (in this project)
 

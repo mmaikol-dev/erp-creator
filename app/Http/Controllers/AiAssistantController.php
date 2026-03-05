@@ -4,8 +4,10 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\AiAssistantChatRequest;
 use App\Models\AiConversation;
+use App\Models\AiTaskRun;
 use App\Services\AiAssistant\AiAssistantService;
 use App\Services\AiAssistant\ConversationMemoryService;
+use App\Services\AiAssistant\TaskRunService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -37,11 +39,26 @@ class AiAssistantController extends Controller
             $conversations = $memory->listConversations($user, 30);
         }
 
+        $taskRunPayload = null;
+        if ($conversation !== null && $user !== null) {
+            /** @var TaskRunService $taskRuns */
+            $taskRuns = app(TaskRunService::class);
+            $taskRun = AiTaskRun::query()
+                ->where('ai_conversation_id', $conversation->id)
+                ->latest('id')
+                ->first();
+
+            if ($taskRun !== null) {
+                $taskRunPayload = $taskRuns->serializeRun($taskRun);
+            }
+        }
+
         return Inertia::render('ai-assistant', [
             'user' => $user,
             'conversationId' => $conversation?->id,
             'messages' => $messages,
             'conversations' => $conversations,
+            'taskRun' => $taskRunPayload,
         ]);
     }
 
@@ -71,17 +88,128 @@ class AiAssistantController extends Controller
         Request $request,
         AiConversation $conversation,
         ConversationMemoryService $memory,
+        TaskRunService $taskRuns,
     ): JsonResponse {
         /** @var \App\Models\User $user */
         $user = $request->user();
 
         abort_unless($conversation->user_id === $user->id, 404);
 
+        $taskRun = AiTaskRun::query()
+            ->where('ai_conversation_id', $conversation->id)
+            ->latest('id')
+            ->first();
+
         return response()->json([
             'ok' => true,
             'conversation_id' => $conversation->id,
             'messages' => $memory->recentMessages($conversation),
             'conversation' => $memory->summarizeConversation($conversation),
+            'task_run' => $taskRun ? $taskRuns->serializeRun($taskRun) : null,
+        ]);
+    }
+
+    public function createTaskRun(
+        Request $request,
+        ConversationMemoryService $memory,
+        TaskRunService $taskRuns,
+    ): JsonResponse {
+        /** @var \App\Models\User $user */
+        $user = $request->user();
+        $validated = $request->validate([
+            'goal' => ['required', 'string', 'max:1200'],
+            'conversation_id' => ['nullable', 'integer'],
+        ]);
+
+        $conversation = $memory->getOrCreateConversation(
+            $user,
+            isset($validated['conversation_id']) ? (int) $validated['conversation_id'] : null
+        );
+
+        $taskRun = $taskRuns->createRun(
+            user: $user,
+            conversation: $conversation,
+            goal: (string) $validated['goal'],
+        );
+
+        return response()->json([
+            'ok' => true,
+            'conversation_id' => $conversation->id,
+            'task_run' => $taskRuns->serializeRun($taskRun),
+        ]);
+    }
+
+    public function showTaskRun(
+        Request $request,
+        AiTaskRun $taskRun,
+        TaskRunService $taskRuns,
+    ): JsonResponse {
+        /** @var \App\Models\User $user */
+        $user = $request->user();
+        $taskRun->loadMissing('conversation');
+
+        abort_unless($taskRun->conversation?->user_id === $user->id, 404);
+
+        return response()->json([
+            'ok' => true,
+            'task_run' => $taskRuns->serializeRun($taskRun),
+        ]);
+    }
+
+    public function runNextTaskStep(
+        Request $request,
+        AiTaskRun $taskRun,
+        TaskRunService $taskRuns,
+    ): JsonResponse {
+        /** @var \App\Models\User $user */
+        $user = $request->user();
+        $taskRun->loadMissing('conversation');
+
+        abort_unless($taskRun->conversation?->user_id === $user->id, 404);
+
+        $result = $taskRuns->runNextStep($user, $taskRun);
+
+        return response()->json([
+            'ok' => true,
+            ...$result,
+        ]);
+    }
+
+    public function pauseTaskRun(
+        Request $request,
+        AiTaskRun $taskRun,
+        TaskRunService $taskRuns,
+    ): JsonResponse {
+        /** @var \App\Models\User $user */
+        $user = $request->user();
+        $taskRun->loadMissing('conversation');
+
+        abort_unless($taskRun->conversation?->user_id === $user->id, 404);
+
+        $updated = $taskRuns->pause($user, $taskRun);
+
+        return response()->json([
+            'ok' => true,
+            'task_run' => $taskRuns->serializeRun($updated),
+        ]);
+    }
+
+    public function resumeTaskRun(
+        Request $request,
+        AiTaskRun $taskRun,
+        TaskRunService $taskRuns,
+    ): JsonResponse {
+        /** @var \App\Models\User $user */
+        $user = $request->user();
+        $taskRun->loadMissing('conversation');
+
+        abort_unless($taskRun->conversation?->user_id === $user->id, 404);
+
+        $updated = $taskRuns->resume($user, $taskRun);
+
+        return response()->json([
+            'ok' => true,
+            'task_run' => $taskRuns->serializeRun($updated),
         ]);
     }
 
@@ -92,6 +220,7 @@ class AiAssistantController extends Controller
         AiAssistantChatRequest $request,
         AiAssistantService $assistant,
         ConversationMemoryService $memory,
+        TaskRunService $taskRuns,
     ): JsonResponse {
         $startedAt = microtime(true);
         /** @var \App\Models\User $user */
@@ -118,14 +247,55 @@ class AiAssistantController extends Controller
 
         try {
             $message = (string) $request->string('message');
+            $mode = (string) $request->input('mode', 'auto');
+
+            if ($taskRuns->shouldAutoOrchestrate($mode, $message)) {
+                $auto = $taskRuns->runAutonomously($user, $conversation, $message);
+
+                $memory->storeMessage(
+                    conversation: $conversation,
+                    role: 'user',
+                    content: $message,
+                    mode: $mode,
+                    stage: 'task_run_goal',
+                );
+                $memory->storeMessage(
+                    conversation: $conversation,
+                    role: 'assistant',
+                    content: (string) $auto['reply'],
+                    model: (string) ($auto['model'] ?? 'system:autonomous-task-runner'),
+                    mode: $mode,
+                    stage: 'task_run_summary',
+                );
+
+                Log::info('ai-assistant.chat.success', [
+                    'user_id' => $user->id,
+                    'conversation_id' => $conversation->id,
+                    'model' => $auto['model'] ?? null,
+                    'intent' => 'deep-autonomous',
+                    'fallback_used' => false,
+                    'duration_ms' => (int) ((microtime(true) - $startedAt) * 1000),
+                ]);
+
+                return response()->json([
+                    'ok' => true,
+                    'conversation_id' => $conversation->id,
+                    'reply' => (string) $auto['reply'],
+                    'model' => (string) ($auto['model'] ?? 'system:autonomous-task-runner'),
+                    'intent' => 'deep',
+                    'fallback_used' => false,
+                    'warnings' => is_array($auto['warnings'] ?? null) ? $auto['warnings'] : [],
+                    'task_run' => $auto['run'] ?? null,
+                ]);
+            }
+
             $result = $assistant->respond(
                 message: $message,
                 history: $history,
-                mode: (string) $request->input('mode', 'auto'),
+                mode: $mode,
                 memorySnippets: $memorySnippets,
             );
 
-            $mode = (string) $request->input('mode', 'auto');
             $memory->storeMessage(
                 conversation: $conversation,
                 role: 'user',
@@ -199,6 +369,7 @@ class AiAssistantController extends Controller
         AiAssistantChatRequest $request,
         AiAssistantService $assistant,
         ConversationMemoryService $memory,
+        TaskRunService $taskRuns,
     ): StreamedResponse {
         $startedAt = microtime(true);
         /** @var \App\Models\User $user */
@@ -231,7 +402,8 @@ class AiAssistantController extends Controller
             $message,
             $mode,
             $startedAt,
-            $user
+            $user,
+            $taskRuns
         ): void {
             try {
                 @set_time_limit(0);
@@ -241,6 +413,155 @@ class AiAssistantController extends Controller
                 ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
                 @ob_flush();
                 flush();
+
+                if ($taskRuns->shouldAutoOrchestrate($mode, $message)) {
+                    echo json_encode([
+                        'type' => 'heartbeat',
+                        'status' => 'autonomous_planning',
+                    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+                    @ob_flush();
+                    flush();
+
+                    $auto = $taskRuns->runAutonomously(
+                        user: $user,
+                        conversation: $conversation,
+                        goal: $message,
+                        onProgress: function (array $progress): void {
+                            $phase = (string) ($progress['phase'] ?? 'autonomous_progress');
+                            $status = match ($phase) {
+                                'run_created' => 'autonomous_run_created',
+                                'step_started' => 'autonomous_step_started',
+                                'step_reviewed' => 'autonomous_step_reviewed',
+                                'run_completed' => 'autonomous_run_completed',
+                                default => 'autonomous_progress',
+                            };
+
+                            echo json_encode([
+                                'type' => 'heartbeat',
+                                'status' => $status,
+                            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+
+                            if ($phase === 'step_started') {
+                                echo json_encode([
+                                    'type' => 'tool_activity',
+                                    'phase' => 'autonomous',
+                                    'status' => 'running',
+                                    'round' => (int) (($progress['step_number'] ?? 1)),
+                                    'attempt' => (int) (($progress['attempt'] ?? 1)),
+                                    'agent' => (string) ($progress['agent'] ?? 'executor'),
+                                    'message' => 'Executing autonomous step',
+                                    'calls' => [[
+                                        'tool' => 'step',
+                                        'path' => null,
+                                        'query' => is_string($progress['step_title'] ?? null)
+                                            ? $progress['step_title']
+                                            : null,
+                                    ]],
+                                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+                            }
+
+                            if ($phase === 'step_reviewed') {
+                                $summary = is_string($progress['review_summary'] ?? null)
+                                    ? trim((string) $progress['review_summary'])
+                                    : '';
+                                $result = is_string($progress['review_result'] ?? null)
+                                    ? trim((string) $progress['review_result'])
+                                    : 'partial';
+
+                                echo json_encode([
+                                    'type' => 'tool_activity',
+                                    'phase' => 'autonomous_review',
+                                    'status' => $result,
+                                    'round' => (int) (($progress['step_number'] ?? 1)),
+                                    'attempt' => (int) (($progress['attempt'] ?? 1)),
+                                    'agent' => (string) ($progress['agent'] ?? 'reviewer'),
+                                    'message' => 'Review gate completed',
+                                    'results' => [[
+                                        'tool' => 'review',
+                                        'ok' => $result === 'pass',
+                                        'path' => null,
+                                        'error' => $summary === '' ? null : $summary,
+                                    ]],
+                                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+                            }
+
+                            if ($phase === 'run_created') {
+                                echo json_encode([
+                                    'type' => 'tool_activity',
+                                    'phase' => 'autonomous_run',
+                                    'status' => 'created',
+                                    'round' => 0,
+                                    'agent' => (string) ($progress['agent'] ?? 'planner'),
+                                    'message' => 'Autonomous task run created',
+                                    'calls' => [[
+                                        'tool' => 'task_run',
+                                        'path' => null,
+                                        'query' => 'Run #'.((string) ($progress['run_id'] ?? '?')),
+                                    ]],
+                                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+                            }
+
+                            if ($phase === 'run_completed') {
+                                echo json_encode([
+                                    'type' => 'tool_activity',
+                                    'phase' => 'autonomous_run',
+                                    'status' => (string) ($progress['status'] ?? 'completed'),
+                                    'round' => (int) (($progress['steps_executed'] ?? 0)),
+                                    'agent' => (string) ($progress['agent'] ?? 'orchestrator'),
+                                    'message' => 'Autonomous run finished',
+                                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+                            }
+
+                            @ob_flush();
+                            flush();
+                        },
+                    );
+
+                    $memory->storeMessage(
+                        conversation: $conversation,
+                        role: 'user',
+                        content: $message,
+                        mode: $mode,
+                        stage: 'task_run_goal',
+                    );
+                    $memory->storeMessage(
+                        conversation: $conversation,
+                        role: 'assistant',
+                        content: (string) $auto['reply'],
+                        model: (string) ($auto['model'] ?? 'system:autonomous-task-runner'),
+                        mode: $mode,
+                        stage: 'task_run_summary',
+                    );
+
+                    echo json_encode([
+                        'type' => 'chunk',
+                        'content' => (string) $auto['reply'],
+                    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+                    @ob_flush();
+                    flush();
+
+                    Log::info('ai-assistant.chat.success', [
+                        'user_id' => $user->id,
+                        'conversation_id' => $conversation->id,
+                        'model' => $auto['model'] ?? null,
+                        'intent' => 'deep-autonomous',
+                        'fallback_used' => false,
+                        'duration_ms' => (int) ((microtime(true) - $startedAt) * 1000),
+                        'stream' => true,
+                    ]);
+
+                    echo json_encode([
+                        'type' => 'done',
+                        'conversation_id' => $conversation->id,
+                        'model' => $auto['model'] ?? null,
+                        'fallback_used' => false,
+                        'warnings' => is_array($auto['warnings'] ?? null) ? $auto['warnings'] : [],
+                    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+                    @ob_flush();
+                    flush();
+
+                    return;
+                }
 
                 $result = $assistant->streamRespond(
                     message: $message,

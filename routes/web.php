@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AiAssistantController;
+use App\Http\Controllers\AiAssistantLogController;
 use Illuminate\Support\Facades\Route;
 use Laravel\Fortify\Features;
 
@@ -18,6 +19,18 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->name('ai-assistant.chat');
     Route::post('ai-assistant/chat/stream', [AiAssistantController::class, 'chatStream'])
         ->name('ai-assistant.chat.stream');
+    Route::get('ai-assistant/logs', AiAssistantLogController::class)
+        ->name('ai-assistant.logs');
+    Route::post('ai-assistant/task-runs', [AiAssistantController::class, 'createTaskRun'])
+        ->name('ai-assistant.task-runs.store');
+    Route::get('ai-assistant/task-runs/{taskRun}', [AiAssistantController::class, 'showTaskRun'])
+        ->name('ai-assistant.task-runs.show');
+    Route::post('ai-assistant/task-runs/{taskRun}/next', [AiAssistantController::class, 'runNextTaskStep'])
+        ->name('ai-assistant.task-runs.next');
+    Route::post('ai-assistant/task-runs/{taskRun}/pause', [AiAssistantController::class, 'pauseTaskRun'])
+        ->name('ai-assistant.task-runs.pause');
+    Route::post('ai-assistant/task-runs/{taskRun}/resume', [AiAssistantController::class, 'resumeTaskRun'])
+        ->name('ai-assistant.task-runs.resume');
     Route::inertia('dashboard', 'dashboard')->name('dashboard');
 
 });

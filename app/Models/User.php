@@ -55,4 +55,14 @@ class User extends Authenticatable
     {
         return $this->hasMany(AiConversation::class);
     }
+
+    public function orders(): HasMany
+    {
+        return $this->hasMany(Order::class);
+    }
+
+    public function customers(): HasMany
+    {
+        return $this->hasMany(Customer::class);
+    }
 }

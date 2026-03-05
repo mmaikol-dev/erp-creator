@@ -96,4 +96,10 @@ return [
     'ui' => [
         'expose_thinking' => (bool) env('AI_ASSISTANT_UI_EXPOSE_THINKING', false),
     ],
+
+    'task_runs' => [
+        'autonomous_enabled' => (bool) env('AI_ASSISTANT_TASK_RUNS_AUTONOMOUS_ENABLED', true),
+        'max_autonomous_steps' => (int) env('AI_ASSISTANT_TASK_RUNS_MAX_AUTONOMOUS_STEPS', 10),
+        'max_attempts_per_step' => (int) env('AI_ASSISTANT_TASK_RUNS_MAX_ATTEMPTS_PER_STEP', 3),
+    ],
 ];

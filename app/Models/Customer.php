@@ -3,28 +3,38 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Foundation\Eloquent\Model;
 
 class Customer extends Model
 {
-    use HasFactory;
+    use HasFactory, SoftDeletes;
 
     protected $fillable = [
-        'name',
+        'user_id',
+        'first_name',
+        'last_name',
         'email',
         'phone',
         'address',
-        'total_spent',
-        'order_count',
+        'city',
+        'state',
+        'postal_code',
+        'country',
+        'total_orders',
+        'lifetime_value',
+        'status',
+        'metadata',
     ];
 
     protected $casts = [
-        'total_spent' => 'decimal:2',
-        'order_count' => 'integer',
+        'lifetime_value' => 'decimal:2',
+        'metadata' => 'json',
     ];
 
-    public function orders()
+    public function user(): BelongsTo
     {
-        return $this->hasMany(Order::class);
+        return $this->belongsTo(User::class);
     }
 }

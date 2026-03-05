@@ -112,11 +112,14 @@ type StreamEvent =
           plan_thinking?: string | null;
           warnings?: string[];
       }
-    | {
+      | {
           type: 'tool_activity';
           phase?: string;
           status?: string;
           round?: number;
+          attempt?: number;
+          agent?: string;
+          message?: string;
           tools?: string[];
           calls?: Array<{
               tool?: string;
@@ -160,6 +163,10 @@ function streamStatusLabel(status: string | null, mode: AssistantMode): string {
                 executing: 'Deep mode: executing...',
                 running_tools: 'Deep mode: running tools...',
                 verifying_typescript: 'Deep mode: verifying TypeScript...',
+                autonomous_planning: 'Deep mode: autonomous planning...',
+                autonomous_run_created: 'Deep mode: autonomous run created...',
+                autonomous_step_started: 'Deep mode: executing autonomous step...',
+                autonomous_step_reviewed: 'Deep mode: reviewing autonomous step...',
                 finalizing: 'Deep mode: finalizing...',
             }[status ?? ''] ?? 'Deep mode: planning and executing...'
         );
@@ -198,6 +205,14 @@ function streamStatusDetail(status: string | null, mode: AssistantMode): string 
                     'Executing requested tools for implementation.',
                 verifying_typescript:
                     'Validating generated TypeScript before final response.',
+                autonomous_planning:
+                    'Deciding and preparing autonomous step-by-step execution.',
+                autonomous_run_created:
+                    'Step plan created. Running without manual input.',
+                autonomous_step_started:
+                    'Executing the current planned step.',
+                autonomous_step_reviewed:
+                    'Reviewing completed step before moving forward.',
                 finalizing: 'Saving and returning final deep-mode response.',
             }[status ?? ''] ??
             'Deep mode runs a planning stage before execution, so this can take longer.'
@@ -622,7 +637,7 @@ export default function AIAssistant() {
         number | null
     >(null);
     const [warnings, setWarnings] = useState<string[]>([]);
-    const [mode, setMode] = useState<AssistantMode>('auto');
+    const [mode, setMode] = useState<AssistantMode>('deep');
     const [streamStatus, setStreamStatus] = useState<string | null>(null);
     const [statusTrail, setStatusTrail] = useState<string[]>([]);
     const [requestStartedAt, setRequestStartedAt] = useState<number | null>(
@@ -867,6 +882,20 @@ export default function AIAssistant() {
                                 typeof event.round === 'number'
                                     ? `round ${event.round}`
                                     : 'round ?';
+                            const attemptText =
+                                typeof event.attempt === 'number'
+                                    ? ` attempt ${event.attempt}`
+                                    : '';
+                            const agentText =
+                                typeof event.agent === 'string' &&
+                                event.agent.trim() !== ''
+                                    ? ` agent=${event.agent}`
+                                    : '';
+                            const messageText =
+                                typeof event.message === 'string' &&
+                                event.message.trim() !== ''
+                                    ? ` ${event.message}`
+                                    : '';
 
                             if (
                                 event.phase === 'tool_calls' &&
@@ -924,6 +953,80 @@ export default function AIAssistant() {
                                 setToolActivity((previous) => [
                                     ...previous.slice(-14),
                                     'Bootstrap snapshot prepared.',
+                                ]);
+                            } else if (
+                                event.phase === 'autonomous_run'
+                            ) {
+                                const status =
+                                    typeof event.status === 'string'
+                                        ? event.status
+                                        : 'unknown';
+                                const runHint = Array.isArray(event.calls)
+                                    ? event.calls
+                                          .map((call) =>
+                                              typeof call.query === 'string'
+                                                  ? call.query
+                                                  : null,
+                                          )
+                                          .filter(
+                                              (
+                                                  value,
+                                              ): value is string => !!value,
+                                          )
+                                          .join(' | ')
+                                    : '';
+
+                                setToolActivity((previous) => [
+                                    ...previous.slice(-14),
+                                    `[autonomous]${agentText} status=${status}${messageText}${runHint ? ` (${runHint})` : ''}`,
+                                ]);
+                            } else if (
+                                event.phase === 'autonomous'
+                            ) {
+                                const stepSummary = Array.isArray(event.calls)
+                                    ? event.calls
+                                          .map((call) => {
+                                              const tool =
+                                                  typeof call.tool === 'string'
+                                                      ? call.tool
+                                                      : 'step';
+                                              const query =
+                                                  typeof call.query === 'string'
+                                                      ? call.query
+                                                      : 'working...';
+                                              return `${tool}: ${query}`;
+                                          })
+                                          .join(' | ')
+                                    : 'running step';
+
+                                setToolActivity((previous) => [
+                                    ...previous.slice(-14),
+                                    `[${roundText}${attemptText}]${agentText} ${stepSummary}${messageText}`,
+                                ]);
+                            } else if (
+                                event.phase === 'autonomous_review'
+                            ) {
+                                const reviewSummary = Array.isArray(event.results)
+                                    ? event.results
+                                          .map((result) => {
+                                              const ok =
+                                                  result.ok === true
+                                                      ? 'pass'
+                                                      : 'fail';
+                                              const detail =
+                                                  typeof result.error ===
+                                                      'string' &&
+                                                  result.error.trim() !== ''
+                                                      ? ` (${result.error})`
+                                                      : '';
+                                              return `${ok}${detail}`;
+                                          })
+                                          .join(' | ')
+                                    : 'review complete';
+
+                                setToolActivity((previous) => [
+                                    ...previous.slice(-14),
+                                    `[${roundText}${attemptText}]${agentText} review: ${reviewSummary}${messageText}`,
                                 ]);
                             }
                         }

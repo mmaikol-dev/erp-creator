@@ -40,4 +40,9 @@ class AiConversation extends Model
                 'ai_messages.content',
             ]);
     }
+
+    public function taskRuns(): HasMany
+    {
+        return $this->hasMany(AiTaskRun::class, 'ai_conversation_id')->orderByDesc('id');
+    }
 }
