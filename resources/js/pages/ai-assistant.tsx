@@ -11,6 +11,7 @@ import {
     Plus,
     Send,
     Square,
+    TerminalSquare,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -83,8 +84,70 @@ type ConversationResponse = {
     conversation_id?: number;
     messages?: Message[];
     conversation?: ConversationSummary;
+    task_run?: TaskRunPayload | null;
     error?: string;
     message?: string;
+    errors?: Record<string, string[]>;
+};
+
+type TaskRunPipelineMeta = {
+    enabled: boolean;
+    blueprint?: string | null;
+    version?: string | null;
+    resource?: string | null;
+    spec?: Record<string, unknown> | null;
+    confident?: boolean;
+    warnings?: string[];
+};
+
+type TaskRunStepChange = {
+    path?: string;
+    exists?: boolean;
+    before?: string;
+    after?: string;
+};
+
+type TaskRunStep = {
+    key?: string;
+    title?: string;
+    status?: string;
+    attempt_count?: number;
+    generated_at?: string;
+    applied_at?: string;
+    skipped_at?: string;
+    changes?: TaskRunStepChange[];
+    validation?: Record<string, unknown>;
+};
+
+type TaskRunPayload = {
+    id: number;
+    conversation_id: number;
+    goal: string;
+    status: string;
+    current_step_index: number;
+    plan: TaskRunStep[];
+    pipeline?: TaskRunPipelineMeta;
+    paused_at?: string | null;
+    completed_at?: string | null;
+    updated_at?: string | null;
+    created_at?: string | null;
+};
+
+type TaskRunPreview = {
+    step_index: number;
+    step_key?: string;
+    step_title?: string;
+    changes?: TaskRunStepChange[];
+    validation?: Record<string, unknown>;
+};
+
+type TaskRunApiResponse = {
+    ok: boolean;
+    task_run?: TaskRunPayload;
+    run?: TaskRunPayload;
+    preview?: TaskRunPreview | null;
+    message?: string;
+    error?: string;
     errors?: Record<string, string[]>;
 };
 
@@ -111,6 +174,8 @@ type StreamEvent =
           thinking?: string | null;
           plan_thinking?: string | null;
           warnings?: string[];
+          task_run?: TaskRunPayload | null;
+          task_run_action?: string | null;
       }
       | {
           type: 'tool_activity';
@@ -132,6 +197,17 @@ type StreamEvent =
               path?: string | null;
               error?: string | null;
           }>;
+          tool?: string;
+          event?: string;
+          stream?: 'stdout' | 'stderr';
+          content?: string;
+          command?: string;
+          cwd?: string;
+          exit_code?: number | null;
+          ok?: boolean;
+          duration_ms?: number;
+          stdout_truncated?: boolean;
+          stderr_truncated?: boolean;
       }
     | {
           type: 'error';
@@ -142,12 +218,19 @@ type AssistantPageProps = {
     conversationId?: number | null;
     messages?: Message[];
     conversations?: ConversationSummary[];
+    taskRun?: TaskRunPayload | null;
 };
 
 type FormattedBlock =
     | { type: 'h1' | 'h2' | 'h3' | 'p' | 'quote'; lines: string[] }
     | { type: 'ul' | 'ol'; items: string[] }
     | { type: 'code'; lines: string[] };
+
+type TerminalLine = {
+    id: string;
+    kind: 'command' | 'stdout' | 'stderr' | 'meta';
+    text: string;
+};
 
 const FAST_MODE_TIMEOUT_MS = 600000;
 const DEEP_MODE_TIMEOUT_MS = 900000;
@@ -347,6 +430,53 @@ function parseApiError(response: Response, payload: unknown): string {
     }
 
     return 'The assistant did not return a response.';
+}
+
+function extractPreviewFromRun(run: TaskRunPayload | null): TaskRunPreview | null {
+    if (!run || !Array.isArray(run.plan)) {
+        return null;
+    }
+
+    const step = run.plan[run.current_step_index];
+
+    if (!step || step.status !== 'preview_ready') {
+        return null;
+    }
+
+    return {
+        step_index: run.current_step_index,
+        step_key: step.key,
+        step_title: step.title,
+        changes: Array.isArray(step.changes) ? step.changes : [],
+        validation:
+            step.validation && typeof step.validation === 'object'
+                ? step.validation
+                : {},
+    };
+}
+
+function looksLikeStructuredPipelineGoal(input: string): boolean {
+    const normalized = input.trim().toLowerCase();
+
+    if (normalized === '') {
+        return false;
+    }
+
+    const signals = [
+        'crud',
+        'module',
+        'resource',
+        'scaffold',
+        'create page',
+        'inertia',
+        'laravel',
+        'controller',
+        'migration',
+        'policy',
+        'factory',
+    ];
+
+    return signals.some((signal) => normalized.includes(signal)) || normalized.length >= 120;
 }
 
 function renderInlineText(text: string, keyPrefix: string) {
@@ -628,6 +758,10 @@ export default function AIAssistant() {
     const initialConversations = Array.isArray(page.props.conversations)
         ? page.props.conversations
         : [];
+    const initialTaskRun =
+        page.props.taskRun && typeof page.props.taskRun === 'object'
+            ? page.props.taskRun
+            : null;
 
     const [prompt, setPrompt] = useState('');
     const [messages, setMessages] = useState<Message[]>(initialMessages);
@@ -637,7 +771,7 @@ export default function AIAssistant() {
         number | null
     >(null);
     const [warnings, setWarnings] = useState<string[]>([]);
-    const [mode, setMode] = useState<AssistantMode>('deep');
+    const [mode, setMode] = useState<AssistantMode>('auto');
     const [streamStatus, setStreamStatus] = useState<string | null>(null);
     const [statusTrail, setStatusTrail] = useState<string[]>([]);
     const [requestStartedAt, setRequestStartedAt] = useState<number | null>(
@@ -646,14 +780,22 @@ export default function AIAssistant() {
     const [elapsedSeconds, setElapsedSeconds] = useState(0);
     const [streamedChars, setStreamedChars] = useState(0);
     const [toolActivity, setToolActivity] = useState<string[]>([]);
+    const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
     const [planningPreview, setPlanningPreview] = useState('');
     const [conversationId, setConversationId] = useState<number | null>(
         initialConversationId,
     );
     const [conversations, setConversations] =
         useState<ConversationSummary[]>(initialConversations);
+    const [taskRun, setTaskRun] = useState<TaskRunPayload | null>(initialTaskRun);
+    const [taskRunPreview, setTaskRunPreview] = useState<TaskRunPreview | null>(
+        extractPreviewFromRun(initialTaskRun),
+    );
+    const [taskRunBusyAction, setTaskRunBusyAction] = useState<string | null>(null);
     const activeRequestControllerRef = useRef<AbortController | null>(null);
     const userCancelledRef = useRef(false);
+    const terminalScrollRef = useRef<HTMLDivElement | null>(null);
+    const typedCommandTimersRef = useRef<number[]>([]);
 
     const suggestions = [
         { title: 'Plan Laravel auth flow', icon: FileText },
@@ -666,6 +808,15 @@ export default function AIAssistant() {
         () => messages.map(({ role, content }) => ({ role, content })),
         [messages],
     );
+    const hasActivePipelineRun =
+        taskRun !== null &&
+        taskRun.pipeline?.enabled === true &&
+        taskRun.status !== 'completed';
+    const showPipelineSuggestion =
+        !hasActivePipelineRun &&
+        taskRun === null &&
+        conversationId !== null &&
+        looksLikeStructuredPipelineGoal(prompt);
 
     useEffect(() => {
         if (!isSending || requestStartedAt === null) {
@@ -688,6 +839,89 @@ export default function AIAssistant() {
             window.clearInterval(interval);
         };
     }, [isSending, requestStartedAt]);
+
+    useEffect(() => {
+        if (!terminalScrollRef.current) {
+            return;
+        }
+
+        terminalScrollRef.current.scrollTop = terminalScrollRef.current.scrollHeight;
+    }, [terminalLines]);
+
+    useEffect(() => {
+        return () => {
+            for (const timer of typedCommandTimersRef.current) {
+                window.clearTimeout(timer);
+            }
+        };
+    }, []);
+
+    const pushTerminalLine = (kind: TerminalLine['kind'], text: string) => {
+        if (text.trim() === '') {
+            return;
+        }
+
+        setTerminalLines((previous) => [
+            ...previous.slice(-299),
+            {
+                id: `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                kind,
+                text,
+            },
+        ]);
+    };
+
+    const typeTerminalCommand = (command: string) => {
+        const trimmed = command.trim();
+        if (trimmed === '') {
+            return;
+        }
+
+        const lineId = `command-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        setTerminalLines((previous) => [
+            ...previous.slice(-299),
+            {
+                id: lineId,
+                kind: 'command',
+                text: '$ ',
+            },
+        ]);
+
+        const maxChars = Math.min(trimmed.length, 160);
+        const stepMs = trimmed.length > 80 ? 8 : 16;
+
+        for (let index = 1; index <= maxChars; index++) {
+            const timer = window.setTimeout(() => {
+                setTerminalLines((previous) =>
+                    previous.map((line) =>
+                        line.id === lineId
+                            ? {
+                                  ...line,
+                                  text: `$ ${trimmed.slice(0, index)}`,
+                              }
+                            : line,
+                    ),
+                );
+            }, index * stepMs);
+            typedCommandTimersRef.current.push(timer);
+        }
+
+        if (trimmed.length > maxChars) {
+            const timer = window.setTimeout(() => {
+                setTerminalLines((previous) =>
+                    previous.map((line) =>
+                        line.id === lineId
+                            ? {
+                                  ...line,
+                                  text: `$ ${trimmed}`,
+                              }
+                            : line,
+                    ),
+                );
+            }, (maxChars + 1) * stepMs);
+            typedCommandTimersRef.current.push(timer);
+        }
+    };
 
     const submitPrompt = async (nextPrompt?: string) => {
         const content = (nextPrompt ?? prompt).trim();
@@ -716,6 +950,11 @@ export default function AIAssistant() {
         setElapsedSeconds(0);
         setStreamedChars(0);
         setToolActivity([]);
+        setTerminalLines([]);
+        for (const timer of typedCommandTimersRef.current) {
+            window.clearTimeout(timer);
+        }
+        typedCommandTimersRef.current = [];
         setPlanningPreview('');
         setIsSending(true);
 
@@ -784,6 +1023,7 @@ export default function AIAssistant() {
                 let finalPlanModel: string | undefined;
                 let finalThinking: string | undefined;
                 let finalPlanThinking: string | undefined;
+                let finalTaskRun: TaskRunPayload | null = null;
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -875,9 +1115,68 @@ export default function AIAssistant() {
                                 event.plan_thinking.trim() !== ''
                                     ? event.plan_thinking
                                     : undefined;
+
+                            finalTaskRun =
+                                event.task_run && typeof event.task_run === 'object'
+                                    ? event.task_run
+                                    : null;
                         }
 
                         if (event.type === 'tool_activity') {
+                            if (event.phase === 'shell_stream') {
+                                if (
+                                    event.status === 'started' &&
+                                    typeof event.command === 'string'
+                                ) {
+                                    if (typeof event.cwd === 'string' && event.cwd.trim() !== '') {
+                                        pushTerminalLine('meta', `cwd: ${event.cwd}`);
+                                    }
+                                    typeTerminalCommand(event.command);
+                                }
+
+                                if (
+                                    (event.status === 'stdout' || event.status === 'stderr') &&
+                                    typeof event.content === 'string' &&
+                                    event.content !== ''
+                                ) {
+                                    const chunks = event.content.split(/\r?\n/);
+                                    for (const chunk of chunks) {
+                                        if (chunk === '') {
+                                            continue;
+                                        }
+                                        pushTerminalLine(
+                                            event.status === 'stdout' ? 'stdout' : 'stderr',
+                                            chunk,
+                                        );
+                                    }
+                                }
+
+                                if (event.status === 'exit') {
+                                    const exitCode =
+                                        typeof event.exit_code === 'number'
+                                            ? event.exit_code
+                                            : null;
+                                    const duration =
+                                        typeof event.duration_ms === 'number'
+                                            ? `${event.duration_ms}ms`
+                                            : '?';
+                                    const outcome =
+                                        event.ok === true ? 'ok' : 'failed';
+
+                                    pushTerminalLine(
+                                        'meta',
+                                        `exit=${exitCode ?? '?'} (${outcome}) in ${duration}`,
+                                    );
+                                }
+
+                                if (
+                                    event.status === 'error' &&
+                                    typeof event.content === 'string'
+                                ) {
+                                    pushTerminalLine('stderr', event.content);
+                                }
+                            }
+
                             const roundText =
                                 typeof event.round === 'number'
                                     ? `round ${event.round}`
@@ -1075,6 +1374,11 @@ export default function AIAssistant() {
                     ),
                 );
 
+                if (finalTaskRun !== null) {
+                    setTaskRun(finalTaskRun);
+                    setTaskRunPreview(extractPreviewFromRun(finalTaskRun));
+                }
+
             setWarnings(finalWarnings);
         } catch (error) {
             const message =
@@ -1160,6 +1464,8 @@ export default function AIAssistant() {
 
             setConversationId(payload.conversation_id);
             setMessages([]);
+            setTaskRun(null);
+            setTaskRunPreview(null);
             if (payload.conversation) {
                 setConversations((previous) => [
                     payload.conversation as ConversationSummary,
@@ -1243,6 +1549,12 @@ export default function AIAssistant() {
 
             setConversationId(payload.conversation_id);
             setMessages(payload.messages);
+            const loadedRun =
+                payload.task_run && typeof payload.task_run === 'object'
+                    ? payload.task_run
+                    : null;
+            setTaskRun(loadedRun);
+            setTaskRunPreview(extractPreviewFromRun(loadedRun));
 
             if (payload.conversation) {
                 setConversations((previous) => [
@@ -1269,6 +1581,190 @@ export default function AIAssistant() {
         } finally {
             setSwitchingConversationId(null);
         }
+    };
+
+    const parseTaskRunResponse = (payload: TaskRunApiResponse): TaskRunPayload | null => {
+        if (payload.task_run && typeof payload.task_run === 'object') {
+            return payload.task_run;
+        }
+
+        if (payload.run && typeof payload.run === 'object') {
+            return payload.run;
+        }
+
+        return null;
+    };
+
+    const requestTaskRunAction = async (
+        action: string,
+        endpoint: string,
+        options?: { body?: Record<string, unknown> },
+    ) => {
+        if (isSending || isCreatingConversation || taskRunBusyAction !== null) {
+            return;
+        }
+
+        setTaskRunBusyAction(action);
+
+        try {
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken(),
+                    Accept: 'application/json',
+                },
+                body: options?.body ? JSON.stringify(options.body) : undefined,
+            });
+
+            const raw = await response.text();
+            let payload: TaskRunApiResponse | null = null;
+
+            if (raw.trim() !== '') {
+                let parsed: unknown = null;
+                try {
+                    parsed = JSON.parse(raw) as unknown;
+                } catch {
+                    parsed = null;
+                }
+
+                if (parsed && typeof parsed === 'object') {
+                    payload = parsed as TaskRunApiResponse;
+                }
+            }
+
+            if (!response.ok || !payload || payload.ok !== true) {
+                throw new Error(parseApiError(response, payload));
+            }
+
+            const nextRun = parseTaskRunResponse(payload);
+
+            if (nextRun) {
+                setTaskRun(nextRun);
+                setTaskRunPreview(payload.preview ?? extractPreviewFromRun(nextRun));
+            } else {
+                setTaskRunPreview(payload.preview ?? null);
+            }
+        } catch (error) {
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : `Task run action "${action}" failed.`;
+
+            setMessages((previous) => [
+                ...previous,
+                {
+                    id: `assistant-error-${Date.now()}`,
+                    role: 'assistant',
+                    content: message,
+                },
+            ]);
+        } finally {
+            setTaskRunBusyAction(null);
+        }
+    };
+
+    const createTaskRun = async () => {
+        const goal = prompt.trim();
+
+        if (!goal) {
+            setMessages((previous) => [
+                ...previous,
+                {
+                    id: `assistant-error-${Date.now()}`,
+                    role: 'assistant',
+                    content: 'Enter a goal first to create a task run.',
+                },
+            ]);
+            return;
+        }
+
+        if (conversationId === null) {
+            setMessages((previous) => [
+                ...previous,
+                {
+                    id: `assistant-error-${Date.now()}`,
+                    role: 'assistant',
+                    content: 'Start or select a conversation first.',
+                },
+            ]);
+            return;
+        }
+
+        await requestTaskRunAction('create', '/ai-assistant/task-runs', {
+            body: {
+                goal,
+                conversation_id: conversationId,
+            },
+        });
+        setPrompt('');
+    };
+
+    const runNextTaskStep = async () => {
+        if (!taskRun) {
+            return;
+        }
+
+        await requestTaskRunAction(
+            'next',
+            `/ai-assistant/task-runs/${taskRun.id}/next`,
+        );
+    };
+
+    const approveTaskStep = async () => {
+        if (!taskRun) {
+            return;
+        }
+
+        await requestTaskRunAction(
+            'approve',
+            `/ai-assistant/task-runs/${taskRun.id}/approve`,
+        );
+    };
+
+    const retryTaskStep = async () => {
+        if (!taskRun) {
+            return;
+        }
+
+        await requestTaskRunAction(
+            'retry',
+            `/ai-assistant/task-runs/${taskRun.id}/retry`,
+        );
+    };
+
+    const skipTaskStep = async () => {
+        if (!taskRun) {
+            return;
+        }
+
+        await requestTaskRunAction(
+            'skip',
+            `/ai-assistant/task-runs/${taskRun.id}/skip`,
+        );
+    };
+
+    const pauseTaskRun = async () => {
+        if (!taskRun) {
+            return;
+        }
+
+        await requestTaskRunAction(
+            'pause',
+            `/ai-assistant/task-runs/${taskRun.id}/pause`,
+        );
+    };
+
+    const resumeTaskRun = async () => {
+        if (!taskRun) {
+            return;
+        }
+
+        await requestTaskRunAction(
+            'resume',
+            `/ai-assistant/task-runs/${taskRun.id}/resume`,
+        );
     };
 
     return (
@@ -1430,119 +1926,157 @@ export default function AIAssistant() {
 
                             <div className="mt-auto pt-6">
                                 <Card className="gap-3 px-3 py-3 sm:px-4">
-                                    <div className="flex items-center gap-2 text-xs">
-                                        <Button
-                                            type="button"
-                                            size="sm"
-                                            variant="outline"
-                                            onClick={() => void startNewChat()}
-                                            disabled={
-                                                isSending ||
-                                                isCreatingConversation ||
-                                                switchingConversationId !== null
-                                            }
-                                        >
-                                            {isCreatingConversation && (
-                                                <Loader2 className="size-4 animate-spin" />
-                                            )}
-                                            New chat
-                                        </Button>
-                                        <Button
-                                            type="button"
-                                            size="sm"
-                                            variant={mode === 'auto' ? 'default' : 'secondary'}
-                                            onClick={() => setMode('auto')}
-                                        >
-                                            Fast
-                                        </Button>
-                                        <Button
-                                            type="button"
-                                            size="sm"
-                                            variant={mode === 'deep' ? 'default' : 'secondary'}
-                                            onClick={() => setMode('deep')}
-                                        >
-                                            Deep
-                                        </Button>
-                                        <span className="text-muted-foreground">
-                                            {mode === 'deep'
-                                                ? 'glm-5 plans, coder executes'
-                                                : 'single-pass by intent'}
-                                        </span>
-                                    </div>
-                                    <form
-                                        className="relative"
-                                        onSubmit={(event) => {
-                                            event.preventDefault();
-                                            void submitPrompt();
-                                        }}
-                                    >
-                                        <textarea
-                                            value={prompt}
-                                            onChange={(event) =>
-                                                setPrompt(event.target.value)
-                                            }
-                                            disabled={
-                                                isSending ||
-                                                isCreatingConversation ||
-                                                switchingConversationId !== null
-                                            }
-                                            onKeyDown={(event) => {
-                                                if (
-                                                    event.key === 'Enter' &&
-                                                    !event.shiftKey
-                                                ) {
+                                    {!hasActivePipelineRun ? (
+                                        <>
+                                            <div className="flex items-center gap-2 text-xs">
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="outline"
+                                                    onClick={() => void startNewChat()}
+                                                    disabled={
+                                                        isSending ||
+                                                        isCreatingConversation ||
+                                                        switchingConversationId !== null
+                                                    }
+                                                >
+                                                    {isCreatingConversation && (
+                                                        <Loader2 className="size-4 animate-spin" />
+                                                    )}
+                                                    New chat
+                                                </Button>
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant={mode === 'auto' ? 'default' : 'secondary'}
+                                                    onClick={() => setMode('auto')}
+                                                >
+                                                    Fast
+                                                </Button>
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant={mode === 'deep' ? 'default' : 'secondary'}
+                                                    onClick={() => setMode('deep')}
+                                                >
+                                                    Deep
+                                                </Button>
+                                                <span className="text-muted-foreground">
+                                                    {mode === 'deep'
+                                                        ? 'glm-5 plans, coder executes'
+                                                        : 'single-pass by intent'}
+                                                </span>
+                                            </div>
+                                            <form
+                                                className="relative"
+                                                onSubmit={(event) => {
                                                     event.preventDefault();
                                                     void submitPrompt();
-                                                }
-                                            }}
-                                            maxLength={3000}
-                                            rows={3}
-                                            placeholder="Ask about your Laravel project..."
-                                            className="border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring/50 min-h-24 w-full resize-none rounded-md border px-3 py-2 pr-12 text-sm shadow-xs outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
-                                        />
-                                        {isSending ? (
-                                            <Button
-                                                size="icon"
-                                                type="button"
-                                                variant="destructive"
-                                                className="absolute right-2 bottom-2 size-9"
-                                                onClick={stopActiveRequest}
+                                                }}
                                             >
-                                                <Square className="size-4" />
-                                            </Button>
-                                        ) : (
-                                            <Button
-                                                size="icon"
-                                                type="submit"
-                                                className="absolute right-2 bottom-2 size-9"
-                                                disabled={
-                                                    isCreatingConversation ||
-                                                    switchingConversationId !== null
-                                                }
-                                            >
-                                                <Send className="size-4" />
-                                            </Button>
-                                        )}
-                                    </form>
-                                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                                        <div className="flex items-center gap-3">
-                                            <button
-                                                type="button"
-                                                className="inline-flex items-center gap-1.5 hover:text-foreground"
-                                            >
-                                                <Paperclip className="size-3.5" />
-                                                Attach
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className="inline-flex items-center gap-1.5 hover:text-foreground"
-                                            >
-                                                <Mic className="size-3.5" />
-                                                Voice Message
-                                            </button>
+                                                <textarea
+                                                    value={prompt}
+                                                    onChange={(event) =>
+                                                        setPrompt(event.target.value)
+                                                    }
+                                                    disabled={
+                                                        isSending ||
+                                                        isCreatingConversation ||
+                                                        switchingConversationId !== null
+                                                    }
+                                                    onKeyDown={(event) => {
+                                                        if (
+                                                            event.key === 'Enter' &&
+                                                            !event.shiftKey
+                                                        ) {
+                                                            event.preventDefault();
+                                                            void submitPrompt();
+                                                        }
+                                                    }}
+                                                    maxLength={3000}
+                                                    rows={3}
+                                                    placeholder="Ask about your Laravel project..."
+                                                    className="border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring/50 min-h-24 w-full resize-none rounded-md border px-3 py-2 pr-12 text-sm shadow-xs outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
+                                                />
+                                                {isSending ? (
+                                                    <Button
+                                                        size="icon"
+                                                        type="button"
+                                                        variant="destructive"
+                                                        className="absolute right-2 bottom-2 size-9"
+                                                        onClick={stopActiveRequest}
+                                                    >
+                                                        <Square className="size-4" />
+                                                    </Button>
+                                                ) : (
+                                                    <Button
+                                                        size="icon"
+                                                        type="submit"
+                                                        className="absolute right-2 bottom-2 size-9"
+                                                        disabled={
+                                                            isCreatingConversation ||
+                                                            switchingConversationId !== null
+                                                        }
+                                                    >
+                                                        <Send className="size-4" />
+                                                    </Button>
+                                                )}
+                                            </form>
+                                            {showPipelineSuggestion && (
+                                                <div className="rounded-md border border-sky-300/50 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+                                                    <p>
+                                                        This looks like a CRUD/module request.
+                                                    </p>
+                                                    <div className="mt-2 flex gap-2">
+                                                        <Button
+                                                            size="sm"
+                                                            onClick={() => void createTaskRun()}
+                                                            disabled={
+                                                                isSending ||
+                                                                isCreatingConversation ||
+                                                                taskRunBusyAction !== null ||
+                                                                conversationId === null
+                                                            }
+                                                        >
+                                                            Run as structured pipeline
+                                                        </Button>
+                                                        <Button
+                                                            size="sm"
+                                                            variant="outline"
+                                                            onClick={() => void submitPrompt()}
+                                                            disabled={isSending}
+                                                        >
+                                                            Continue in chat
+                                                        </Button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                                                <div className="flex items-center gap-3">
+                                                    <button
+                                                        type="button"
+                                                        className="inline-flex items-center gap-1.5 hover:text-foreground"
+                                                    >
+                                                        <Paperclip className="size-3.5" />
+                                                        Attach
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="inline-flex items-center gap-1.5 hover:text-foreground"
+                                                    >
+                                                        <Mic className="size-3.5" />
+                                                        Voice Message
+                                                    </button>
+                                                </div>
+                                                <span>{prompt.length}/3000</span>
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                                            Structured pipeline run is active. Use the guided stepper in the right panel
+                                            (`Next`, `Approve`, `Retry`, `Skip`, `Pause/Resume`).
                                         </div>
-                                        <span>{prompt.length}/3000</span>
-                                    </div>
+                                    )}
                                     {warnings.length > 0 && (
                                         <div className="rounded-md border border-amber-300/50 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
                                             {warnings.join(' ')}
@@ -1559,60 +2093,278 @@ export default function AIAssistant() {
                         </div>
                     </section>
 
-                    <aside className="w-full border-t bg-muted/30 lg:w-80 lg:border-t-0 lg:border-l">
-                        <div className="flex items-center justify-between border-b px-4 py-4">
-                            <h2 className="text-sm font-semibold">
-                                Conversations
-                            </h2>
-                            <Button
-                                size="sm"
-                                variant="secondary"
-                                onClick={() => void startNewChat()}
-                                disabled={
-                                    isSending ||
-                                    isCreatingConversation ||
-                                    switchingConversationId !== null
-                                }
-                            >
-                                New
-                            </Button>
-                        </div>
-                        <div className="max-h-[360px] space-y-1 overflow-y-auto p-2 lg:h-[calc(100vh-8rem)] lg:max-h-none">
-                            {conversations.length === 0 ? (
-                                <div className="rounded-lg border bg-background px-3 py-3 text-xs text-muted-foreground">
-                                    No conversations yet.
+                    <aside className="w-full border-t bg-muted/30 lg:w-96 lg:border-t-0 lg:border-l">
+                        <div className="flex h-full flex-col">
+                            <div className="flex items-center justify-between border-b px-4 py-4">
+                                <h2 className="text-sm font-semibold">
+                                    Conversations
+                                </h2>
+                                <Button
+                                    size="sm"
+                                    variant="secondary"
+                                    onClick={() => void startNewChat()}
+                                    disabled={
+                                        isSending ||
+                                        isCreatingConversation ||
+                                        switchingConversationId !== null
+                                    }
+                                >
+                                    New
+                                </Button>
+                            </div>
+                            <div className="max-h-[320px] space-y-1 overflow-y-auto border-b p-2 lg:h-[42vh] lg:max-h-none">
+                                {conversations.length === 0 ? (
+                                    <div className="rounded-lg border bg-background px-3 py-3 text-xs text-muted-foreground">
+                                        No conversations yet.
+                                    </div>
+                                ) : (
+                                    conversations.map((item) => (
+                                        <button
+                                            key={item.id}
+                                            type="button"
+                                            onClick={() =>
+                                                void loadConversation(item.id)
+                                            }
+                                            disabled={
+                                                isSending ||
+                                                isCreatingConversation ||
+                                                switchingConversationId !== null
+                                            }
+                                            className={`w-full rounded-lg border px-3 py-3 text-left transition-colors ${
+                                                item.id === conversationId
+                                                    ? 'border-primary bg-accent'
+                                                    : 'bg-background hover:bg-accent'
+                                            }`}
+                                        >
+                                            <p className="text-sm font-medium">
+                                                {item.title &&
+                                                item.title !== 'AI Assistant'
+                                                    ? item.title
+                                                    : `Conversation #${item.id}`}
+                                            </p>
+                                            <p className="mt-1 text-xs text-muted-foreground">
+                                                {item.preview}
+                                            </p>
+                                        </button>
+                                    ))
+                                )}
+                            </div>
+                            <div className="border-b bg-background/60 p-3">
+                                <div className="mb-2 flex items-center justify-between">
+                                    <h3 className="text-sm font-semibold">Task Run</h3>
+                                    {taskRunBusyAction && (
+                                        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                                            <Loader2 className="size-3 animate-spin" />
+                                            {taskRunBusyAction}
+                                        </span>
+                                    )}
                                 </div>
-                            ) : (
-                                conversations.map((item) => (
-                                    <button
-                                        key={item.id}
-                                        type="button"
-                                        onClick={() =>
-                                            void loadConversation(item.id)
-                                        }
-                                        disabled={
-                                            isSending ||
-                                            isCreatingConversation ||
-                                            switchingConversationId !== null
-                                        }
-                                        className={`w-full rounded-lg border px-3 py-3 text-left transition-colors ${
-                                            item.id === conversationId
-                                                ? 'border-primary bg-accent'
-                                                : 'bg-background hover:bg-accent'
-                                        }`}
+
+                                {taskRun ? (
+                                    <div className="space-y-3">
+                                        <div className="rounded-md border p-2 text-xs">
+                                            <p className="font-medium">
+                                                {taskRun.pipeline?.resource
+                                                    ? `${taskRun.pipeline.resource} pipeline`
+                                                    : 'Pipeline run'}
+                                            </p>
+                                            <p className="mt-1 text-muted-foreground">
+                                                status={taskRun.status} · step {taskRun.current_step_index + 1}/
+                                                {taskRun.plan.length}
+                                            </p>
+                                            {Array.isArray(taskRun.pipeline?.warnings) &&
+                                                taskRun.pipeline.warnings.length > 0 && (
+                                                    <p className="mt-1 text-amber-700">
+                                                        {taskRun.pipeline.warnings.join(' ')}
+                                                    </p>
+                                                )}
+                                        </div>
+
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <Button
+                                                size="sm"
+                                                variant="secondary"
+                                                disabled={
+                                                    isSending ||
+                                                    isCreatingConversation ||
+                                                    taskRunBusyAction !== null ||
+                                                    taskRun.status === 'completed'
+                                                }
+                                                onClick={() => void runNextTaskStep()}
+                                            >
+                                                Next
+                                            </Button>
+                                            <Button
+                                                size="sm"
+                                                disabled={
+                                                    isSending ||
+                                                    isCreatingConversation ||
+                                                    taskRunBusyAction !== null ||
+                                                    taskRun.status !== 'needs_approval'
+                                                }
+                                                onClick={() => void approveTaskStep()}
+                                            >
+                                                Approve
+                                            </Button>
+                                            <Button
+                                                size="sm"
+                                                variant="outline"
+                                                disabled={
+                                                    isSending ||
+                                                    isCreatingConversation ||
+                                                    taskRunBusyAction !== null ||
+                                                    taskRun.status === 'completed'
+                                                }
+                                                onClick={() => void retryTaskStep()}
+                                            >
+                                                Retry
+                                            </Button>
+                                            <Button
+                                                size="sm"
+                                                variant="outline"
+                                                disabled={
+                                                    isSending ||
+                                                    isCreatingConversation ||
+                                                    taskRunBusyAction !== null ||
+                                                    taskRun.status === 'completed'
+                                                }
+                                                onClick={() => void skipTaskStep()}
+                                            >
+                                                Skip
+                                            </Button>
+                                            {taskRun.status === 'paused' ? (
+                                                <Button
+                                                    size="sm"
+                                                    className="col-span-2"
+                                                    disabled={
+                                                        isSending ||
+                                                        isCreatingConversation ||
+                                                        taskRunBusyAction !== null
+                                                    }
+                                                    onClick={() => void resumeTaskRun()}
+                                                >
+                                                    Resume
+                                                </Button>
+                                            ) : (
+                                                <Button
+                                                    size="sm"
+                                                    variant="outline"
+                                                    className="col-span-2"
+                                                    disabled={
+                                                        isSending ||
+                                                        isCreatingConversation ||
+                                                        taskRunBusyAction !== null ||
+                                                        taskRun.status === 'completed'
+                                                    }
+                                                    onClick={() => void pauseTaskRun()}
+                                                >
+                                                    Pause
+                                                </Button>
+                                            )}
+                                        </div>
+
+                                        {taskRun.plan.length > 0 && (
+                                            <div className="rounded-md border p-2">
+                                                <p className="text-xs font-medium">Steps</p>
+                                                <div className="mt-1 max-h-28 space-y-1 overflow-y-auto text-xs">
+                                                    {taskRun.plan.map((step, index) => (
+                                                        <p
+                                                            key={`${taskRun.id}-step-${index}`}
+                                                            className={
+                                                                index === taskRun.current_step_index
+                                                                    ? 'font-medium text-foreground'
+                                                                    : 'text-muted-foreground'
+                                                            }
+                                                        >
+                                                            {index + 1}. {step.title ?? 'Untitled step'} ·{' '}
+                                                            {step.status ?? 'pending'}
+                                                        </p>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {taskRunPreview && (
+                                            <div className="rounded-md border p-2">
+                                                <p className="text-xs font-medium">
+                                                    Preview · {taskRunPreview.step_title ?? `Step ${taskRunPreview.step_index + 1}`}
+                                                </p>
+                                                <div className="mt-1 max-h-32 space-y-1 overflow-y-auto text-xs text-muted-foreground">
+                                                    {(taskRunPreview.changes ?? []).length === 0 ? (
+                                                        <p>No file changes in preview.</p>
+                                                    ) : (
+                                                        (taskRunPreview.changes ?? []).map((change, index) => (
+                                                            <p key={`preview-change-${index}`}>
+                                                                {change.path ?? 'unknown path'}
+                                                                {typeof change.exists === 'boolean'
+                                                                    ? change.exists
+                                                                        ? ' (update)'
+                                                                        : ' (create)'
+                                                                    : ''}
+                                                            </p>
+                                                        ))
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <div className="rounded-md border p-2 text-xs text-muted-foreground">
+                                        No active structured run.
+                                        {showPipelineSuggestion
+                                            ? ' Use the prompt CTA to run this request as a structured pipeline.'
+                                            : ' A structured pipeline suggestion appears automatically for CRUD/module prompts.'}
+                                    </div>
+                                )}
+                            </div>
+                            <div className="flex min-h-[280px] flex-1 flex-col">
+                                <div className="flex items-center justify-between border-b px-4 py-3">
+                                    <div className="inline-flex items-center gap-2">
+                                        <TerminalSquare className="size-4 text-muted-foreground" />
+                                        <h3 className="text-sm font-semibold">
+                                            Live Terminal
+                                        </h3>
+                                    </div>
+                                    <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        onClick={() => setTerminalLines([])}
+                                        disabled={terminalLines.length === 0}
                                     >
-                                        <p className="text-sm font-medium">
-                                            {item.title &&
-                                            item.title !== 'AI Assistant'
-                                                ? item.title
-                                                : `Conversation #${item.id}`}
+                                        Clear
+                                    </Button>
+                                </div>
+                                <div
+                                    ref={terminalScrollRef}
+                                    className="h-64 flex-1 overflow-y-auto bg-zinc-950 p-3 font-mono text-xs lg:h-auto"
+                                >
+                                    {terminalLines.length === 0 ? (
+                                        <p className="text-zinc-400">
+                                            Shell output will appear here when
+                                            the assistant runs commands.
                                         </p>
-                                        <p className="mt-1 text-xs text-muted-foreground">
-                                            {item.preview}
-                                        </p>
-                                    </button>
-                                ))
-                            )}
+                                    ) : (
+                                        <div className="space-y-1">
+                                            {terminalLines.map((line) => (
+                                                <p
+                                                    key={line.id}
+                                                    className={`whitespace-pre-wrap ${
+                                                        line.kind === 'command'
+                                                            ? 'text-emerald-300'
+                                                            : line.kind === 'stderr'
+                                                              ? 'text-rose-300'
+                                                              : line.kind === 'meta'
+                                                                ? 'text-zinc-400'
+                                                                : 'text-zinc-200'
+                                                    }`}
+                                                >
+                                                    {line.text}
+                                                </p>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
                         </div>
                     </aside>
                 </div>

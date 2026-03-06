@@ -22,7 +22,6 @@ class Customer extends Model
         'state',
         'postal_code',
         'country',
-        'total_orders',
         'lifetime_value',
         'status',
         'metadata',

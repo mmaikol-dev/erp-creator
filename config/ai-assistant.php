@@ -41,6 +41,7 @@ return [
             'max_read_chars' => (int) env('AI_ASSISTANT_FS_MAX_READ_CHARS', 200000),
             'max_write_chars' => (int) env('AI_ASSISTANT_FS_MAX_WRITE_CHARS', 400000),
             'max_tool_rounds' => (int) env('AI_ASSISTANT_FS_MAX_TOOL_ROUNDS', 16),
+            'max_tool_rounds_hard_cap' => (int) env('AI_ASSISTANT_FS_MAX_TOOL_ROUNDS_HARD_CAP', 24),
             'max_search_results' => (int) env('AI_ASSISTANT_FS_MAX_SEARCH_RESULTS', 60),
             'max_search_file_bytes' => (int) env('AI_ASSISTANT_FS_MAX_SEARCH_FILE_BYTES', 300000),
             'shell' => [
@@ -101,5 +102,15 @@ return [
         'autonomous_enabled' => (bool) env('AI_ASSISTANT_TASK_RUNS_AUTONOMOUS_ENABLED', true),
         'max_autonomous_steps' => (int) env('AI_ASSISTANT_TASK_RUNS_MAX_AUTONOMOUS_STEPS', 10),
         'max_attempts_per_step' => (int) env('AI_ASSISTANT_TASK_RUNS_MAX_ATTEMPTS_PER_STEP', 3),
+    ],
+
+    'pipeline' => [
+        'enabled' => (bool) env('AI_ASSISTANT_PIPELINE_ENABLED', true),
+        'validation_commands' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('AI_ASSISTANT_PIPELINE_VALIDATION_COMMANDS', 'npm run types,php artisan migrate --pretend --force'))
+        ))),
+        'validation_timeout_seconds' => (int) env('AI_ASSISTANT_PIPELINE_VALIDATION_TIMEOUT_SECONDS', 180),
+        'validation_max_output_chars' => (int) env('AI_ASSISTANT_PIPELINE_VALIDATION_MAX_OUTPUT_CHARS', 16000),
     ],
 ];

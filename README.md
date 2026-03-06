@@ -16,6 +16,20 @@ This project is a Laravel + Inertia AI assistant with:
 - enforced TypeScript quality gate for coding/CRUD responses
 - canonical page template reference support for CRUD/page generation
 
+## Recent pipeline updates (2026-03-06)
+
+- Refactored CRUD prompt compilation to a typed `CompiledSpec` DTO (`SpecCompiler::compileCrud()` now returns DTO).
+- Added compatibility conversion methods (`toLegacyArray()` / `fromLegacyArray()`) for run metadata storage.
+- Refactored pipeline status handling to enum-based transitions via `PipelineStatus`.
+- Extracted route insertion logic to `App\Services\AiAssistant\Pipeline\IO\RouteInserter`.
+- Extracted filesystem writes to `App\Services\AiAssistant\Pipeline\IO\FileWriter` with `LaravelFileWriter` implementation.
+- Added container binding for `FileWriter` in `AppServiceProvider`.
+- Hardened step approval path:
+  - write failures trigger rollback and pause the run with structured error payload
+  - empty generated artifact paths now fail fast instead of being silently skipped
+  - ownership checks now fail explicitly when conversation relation is missing
+- Added unit coverage in `tests/Unit/GenerationPipelineServiceTest.php` for route insertion and failure guards.
+
 ## High-level architecture
 
 ```mermaid
@@ -181,6 +195,9 @@ Defined in `routes/web.php` under `auth` + `verified` middleware:
 - `POST /ai-assistant/task-runs` -> `AiAssistantController::createTaskRun`
 - `GET /ai-assistant/task-runs/{taskRun}` -> `AiAssistantController::showTaskRun`
 - `POST /ai-assistant/task-runs/{taskRun}/next` -> `AiAssistantController::runNextTaskStep`
+- `POST /ai-assistant/task-runs/{taskRun}/approve` -> `AiAssistantController::approveTaskRunStep`
+- `POST /ai-assistant/task-runs/{taskRun}/retry` -> `AiAssistantController::retryTaskRunStep`
+- `POST /ai-assistant/task-runs/{taskRun}/skip` -> `AiAssistantController::skipTaskRunStep`
 - `POST /ai-assistant/task-runs/{taskRun}/pause` -> `AiAssistantController::pauseTaskRun`
 - `POST /ai-assistant/task-runs/{taskRun}/resume` -> `AiAssistantController::resumeTaskRun`
 
@@ -261,6 +278,22 @@ Responsibilities:
 - pause/resume long-running task orchestration safely
 - run mandatory review gate per step (`pass|partial|fail`) before advancing
 - keep plan state, current step, and review notes synchronized for UI resume/continue
+- route CRUD/module goals to deterministic pipeline runs when enabled
+
+### `GenerationPipelineService` (deterministic CRUD pipeline)
+
+Responsibilities:
+- compile plain-English goals to a typed CRUD spec (`SpecCompiler`)
+- generate deterministic files per step (`CrudBlueprintGenerator`)
+- build per-step previews with before/after snapshots before any write
+- enforce explicit step actions: `next` (preview), `approve`, `retry`, `skip`
+- validate after apply and rollback touched files automatically if validation fails
+
+CRUD step order:
+1. `model_migration`
+2. `http_layer`
+3. `inertia_pages`
+4. `factory_tests`
 
 ### `FilesystemToolService`
 
@@ -411,6 +444,12 @@ Quality gate config:
 - `AI_ASSISTANT_TS_CHECK_TIMEOUT_SECONDS` default `120`
 - `AI_ASSISTANT_TS_CHECK_MAX_OUTPUT_CHARS` default `24000`
 
+Pipeline config:
+- `AI_ASSISTANT_PIPELINE_ENABLED` default `true`
+- `AI_ASSISTANT_PIPELINE_VALIDATION_COMMANDS` default `npm run types` (comma-separated)
+- `AI_ASSISTANT_PIPELINE_VALIDATION_TIMEOUT_SECONDS` default `180`
+- `AI_ASSISTANT_PIPELINE_VALIDATION_MAX_OUTPUT_CHARS` default `16000`
+
 UI config:
 - `AI_ASSISTANT_UI_EXPOSE_THINKING` default `false` (when enabled, captured `<think>...</think>` content can be shown in the message details panel)
 
@@ -515,8 +554,8 @@ Logged fields include:
 
 ## Current module state
 
-- AI-generated `orders`, `products`, and `budgets` CRUD modules were removed from the app scaffold.
-- Remaining documented routes/pages in this README refer to the AI assistant module and core starter-kit pages.
+- The AI assistant is configured to create new application pages and modules with full CRUD functionality when requested.
+- This README documents the current AI assistant module and core starter-kit pages that are present in the repository.
 
 ## Key files map
 
@@ -541,6 +580,11 @@ Logged fields include:
   - `resources/js/pages/ai-assistant.tsx`
 - Task orchestration service:
   - `app/Services/AiAssistant/TaskRunService.php`
+- Deterministic pipeline services:
+  - `app/Services/AiAssistant/Pipeline/GenerationPipelineService.php`
+  - `app/Services/AiAssistant/Pipeline/SpecCompiler.php`
+  - `app/Services/AiAssistant/Pipeline/CrudBlueprintGenerator.php`
+  - `app/Services/AiAssistant/Pipeline/PipelineValidator.php`
 - Page template reference:
   - `tasks/page-template-reference.md`
   - `tasks/import-pattern-reference.md`

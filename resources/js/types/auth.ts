@@ -10,15 +10,14 @@ export type User = {
     [key: string]: unknown;
 };
 
-export type Auth = {
-    user: User;
-};
-
-export type TwoFactorSetupData = {
-    svg: string;
-    url: string;
-};
-
-export type TwoFactorSecretKey = {
-    secretKey: string;
+export type Hospital = {
+    id: number;
+    name: string;
+    address: string | null;
+    phone: string | null;
+    email: string | null;
+    status: 'active' | 'inactive';
+    created_at: string;
+    updated_at: string;
+    [key: string]: unknown;
 };

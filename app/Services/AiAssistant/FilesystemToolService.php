@@ -12,9 +12,10 @@ class FilesystemToolService
 {
     /**
      * @param  array<string, mixed>  $call
+     * @param  callable(array<string, mixed>): void|null  $onShellEvent
      * @return array<string, mixed>
      */
-    public function execute(array $call): array
+    public function execute(array $call, ?callable $onShellEvent = null): array
     {
         $tool = isset($call['tool']) && is_string($call['tool'])
             ? trim($call['tool'])
@@ -38,7 +39,7 @@ class FilesystemToolService
             'create_directory' => $this->createDirectory($arguments),
             'list_directory' => $this->listDirectory($arguments),
             'search_code' => $this->searchCode($arguments),
-            'run_shell' => $this->runShell($arguments),
+            'run_shell' => $this->runShell($arguments, $onShellEvent),
             'web_search' => $this->webSearch($arguments),
             default => throw new RuntimeException("Unknown tool: {$tool}"),
         };
@@ -58,6 +59,22 @@ class FilesystemToolService
 
         /** @var mixed $calls */
         $calls = $decoded['tool_calls'] ?? null;
+
+        // Accept a single tool-call object shape: {"tool":"read_file","arguments":{...}}
+        if (! is_array($calls)
+            && isset($decoded['tool']) && is_string($decoded['tool'])
+            && trim((string) $decoded['tool']) !== ''
+        ) {
+            $calls = [[
+                'tool' => $decoded['tool'],
+                'arguments' => is_array($decoded['arguments'] ?? null) ? $decoded['arguments'] : [],
+            ]];
+        }
+
+        // Accept alternate key sometimes produced by models.
+        if (! is_array($calls) && is_array($decoded['calls'] ?? null)) {
+            $calls = $decoded['calls'];
+        }
 
         if (! is_array($calls) || $calls === []) {
             return [];
@@ -554,9 +571,10 @@ class FilesystemToolService
 
     /**
      * @param  array<string, mixed>  $arguments
+     * @param  callable(array<string, mixed>): void|null  $onShellEvent
      * @return array<string, mixed>
      */
-    private function runShell(array $arguments): array
+    private function runShell(array $arguments, ?callable $onShellEvent = null): array
     {
         if (! $this->enabled()) {
             throw new RuntimeException('Filesystem tools are disabled.');
@@ -596,18 +614,61 @@ class FilesystemToolService
             : (int) config('ai-assistant.tools.filesystem.shell.timeout_seconds', 30);
         $timeout = min(300, max(2, $timeout));
         $maxOutput = max(500, (int) config('ai-assistant.tools.filesystem.shell.max_output_chars', 12000));
+        $startedAt = microtime(true);
 
         $process = Process::fromShellCommandline($command, $cwd);
         $process->setTimeout($timeout);
+        $this->emitShellEvent($onShellEvent, [
+            'event' => 'started',
+            'command' => $command,
+            'cwd' => $cwd,
+            'timeout_seconds' => $timeout,
+        ]);
+
+        $stdout = '';
+        $stderr = '';
 
         try {
-            $process->run();
+            $process->run(function (string $type, string $buffer) use (&$stdout, &$stderr, $onShellEvent): void {
+                if ($type === Process::OUT) {
+                    $stdout .= $buffer;
+                    $this->emitShellEvent($onShellEvent, [
+                        'event' => 'stdout',
+                        'stream' => 'stdout',
+                        'content' => $buffer,
+                    ]);
+
+                    return;
+                }
+
+                $stderr .= $buffer;
+                $this->emitShellEvent($onShellEvent, [
+                    'event' => 'stderr',
+                    'stream' => 'stderr',
+                    'content' => $buffer,
+                ]);
+            });
         } catch (ProcessTimedOutException $exception) {
+            $this->emitShellEvent($onShellEvent, [
+                'event' => 'error',
+                'stream' => 'stderr',
+                'content' => "Command timed out after {$timeout}s.",
+            ]);
+
             throw new RuntimeException("Shell command timed out after {$timeout}s: ".$exception->getMessage());
         }
 
-        $stdout = $process->getOutput();
-        $stderr = $process->getErrorOutput();
+        $stdoutTruncated = mb_strlen($stdout) > $maxOutput;
+        $stderrTruncated = mb_strlen($stderr) > $maxOutput;
+        $durationMs = (int) ((microtime(true) - $startedAt) * 1000);
+        $this->emitShellEvent($onShellEvent, [
+            'event' => 'exit',
+            'exit_code' => $process->getExitCode(),
+            'ok' => $process->isSuccessful(),
+            'duration_ms' => $durationMs,
+            'stdout_truncated' => $stdoutTruncated,
+            'stderr_truncated' => $stderrTruncated,
+        ]);
 
         return [
             'tool' => 'run_shell',
@@ -617,9 +678,26 @@ class FilesystemToolService
             'ok' => $process->isSuccessful(),
             'stdout' => mb_substr($stdout, 0, $maxOutput),
             'stderr' => mb_substr($stderr, 0, $maxOutput),
-            'stdout_truncated' => mb_strlen($stdout) > $maxOutput,
-            'stderr_truncated' => mb_strlen($stderr) > $maxOutput,
+            'stdout_truncated' => $stdoutTruncated,
+            'stderr_truncated' => $stderrTruncated,
         ];
+    }
+
+    /**
+     * @param  callable(array<string, mixed>): void|null  $onShellEvent
+     * @param  array<string, mixed>  $event
+     */
+    private function emitShellEvent(?callable $onShellEvent, array $event): void
+    {
+        if ($onShellEvent === null) {
+            return;
+        }
+
+        try {
+            $onShellEvent($event);
+        } catch (\Throwable) {
+            // Ignore callback failures so tool execution can continue.
+        }
     }
 
     /**

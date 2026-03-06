@@ -44,7 +44,12 @@ class AiAssistantService
             return $this->greetingResponse();
         }
 
-        if ($mode === 'deep') {
+        $directFileReview = $this->maybeDirectFileReviewResponse($message);
+        if ($directFileReview !== null) {
+            return $directFileReview;
+        }
+
+        if ($mode === 'deep' && ! $this->isReadOnlyFileRequest($message)) {
             return $this->respondInDeepMode($message, $history, $memorySnippets);
         }
 
@@ -135,7 +140,19 @@ class AiAssistantService
             return $this->greetingResponse($onChunk);
         }
 
-        if ($mode === 'deep') {
+        $directFileReview = $this->maybeDirectFileReviewResponse($message);
+        if ($directFileReview !== null) {
+            if ($onChunk !== null) {
+                $onChunk($directFileReview['reply']);
+            }
+            if ($onStatus !== null) {
+                $onStatus('finalizing');
+            }
+
+            return $directFileReview;
+        }
+
+        if ($mode === 'deep' && ! $this->isReadOnlyFileRequest($message)) {
             $result = $this->respondInDeepMode(
                 $message,
                 $history,
@@ -398,6 +415,10 @@ class AiAssistantService
             'update file',
         ];
 
+        if ($this->isReadOnlyFileRequest($message)) {
+            return 'coding';
+        }
+
         foreach ($codingKeywords as $keyword) {
             if (str_contains($normalized, $keyword)) {
                 return 'coding';
@@ -440,7 +461,6 @@ class AiAssistantService
             'implement',
             'fix',
             'refactor',
-            'products',
         ];
 
         foreach ($codingSignals as $signal) {
@@ -758,6 +778,8 @@ class AiAssistantService
         $maxWebSearchCallsPerRequest = max(1, (int) config('ai-assistant.tools.web_search.max_calls_per_request', 2));
         $toolCallSignatures = [];
         $lastToolNames = [];
+        $consecutiveReadOnlyRounds = 0;
+        $rawToolPayloadRetryAttempted = false;
 
         if ($requireTypecheck && ! $unboundedToolRounds) {
             $maxToolRounds += 4;
@@ -824,6 +846,24 @@ class AiAssistantService
             $calls = $this->filesystemTools->extractToolCalls($result['content']);
 
             if ($calls === []) {
+                if (! $rawToolPayloadRetryAttempted && $this->isRawToolPayloadOutput($result['content'])) {
+                    $rawToolPayloadRetryAttempted = true;
+                    $toolWarnings[] = 'Detected raw tool payload in assistant output; forcing one extra execution/finalization round.';
+
+                    $currentMessages[] = [
+                        'role' => 'assistant',
+                        'content' => $result['content'],
+                    ];
+                    $currentMessages[] = [
+                        'role' => 'user',
+                        'content' => 'Your previous response exposed raw tool payload JSON. '.
+                            'Do not show tool_calls/calls/tool JSON to the user. '.
+                            'Execute any pending tool work first, then return only a normal user-facing summary and changed files.',
+                    ];
+
+                    continue;
+                }
+
                 if ($this->looksLikeMalformedToolCallOutput($result['content'])) {
                     $toolWarnings[] = 'Model output resembled tool_calls JSON but could not be parsed; requesting strict JSON retry.';
 
@@ -904,7 +944,7 @@ class AiAssistantService
                             'content' => "TypeScript check failed. Command: {$typecheck['command']}\n".
                                 "Exit code: {$typecheck['exit_code']}\n".
                                 "stdout:\n{$typecheck['stdout']}\n\nstderr:\n{$typecheck['stderr']}\n\n".
-                                'Use filesystem tools to fix all TypeScript errors, then provide final answer.',
+                                'Use filesystem tools to fix all TypeScript errors. Output strict tool_calls JSON only until errors are resolved; avoid planning prose.',
                         ];
 
                         continue;
@@ -947,6 +987,14 @@ class AiAssistantService
                 $calls
             )));
             $webSearchUsed = $webSearchUsed || in_array('web_search', $lastToolNames, true);
+            $readOnlyTools = ['read_file', 'list_directory', 'search_code'];
+            $allReadOnlyRound = $lastToolNames !== []
+                && array_reduce($lastToolNames, static function (bool $carry, string $tool) use ($readOnlyTools): bool {
+                    return $carry && in_array($tool, $readOnlyTools, true);
+                }, true);
+            $consecutiveReadOnlyRounds = $allReadOnlyRound
+                ? $consecutiveReadOnlyRounds + 1
+                : 0;
 
             if ($onToolActivity !== null) {
                 $onToolActivity([
@@ -1002,11 +1050,26 @@ class AiAssistantService
                         $webSearchCallsExecuted++;
                     }
 
+                    $shellEventForwarder = null;
+                    if ($callTool === 'run_shell' && $onToolActivity !== null) {
+                        $shellEventForwarder = function (array $shellEvent) use ($onToolActivity, $round): void {
+                            $onToolActivity([
+                                'phase' => 'shell_stream',
+                                'status' => isset($shellEvent['event']) && is_string($shellEvent['event'])
+                                    ? $shellEvent['event']
+                                    : 'update',
+                                'round' => $round,
+                                'tool' => 'run_shell',
+                                ...$shellEvent,
+                            ]);
+                        };
+                    }
+
                     $toolResults[] = [
                         'index' => $index,
                         'ok' => true,
                         'call' => $call,
-                        'result' => $this->filesystemTools->execute($call),
+                        'result' => $this->filesystemTools->execute($call, $shellEventForwarder),
                     ];
                 } catch (Throwable $exception) {
                     $toolWarnings[] = "Filesystem tool failed: {$exception->getMessage()}";
@@ -1043,6 +1106,15 @@ class AiAssistantService
                 'content' => "Tool results:\n{$serialized}\nUse these results to continue. ".
                     'If no more tool calls are needed, provide the final user-facing answer.',
             ];
+
+            if ($crudRequest && $consecutiveReadOnlyRounds >= 3) {
+                $toolWarnings[] = 'Detected repeated discovery-only rounds; forcing direct implementation edits.';
+                $currentMessages[] = [
+                    'role' => 'user',
+                    'content' => 'Stop discovery now. In the next response, output ONLY strict tool_calls JSON using write_file/edit/append_file '.
+                        'to implement concrete code changes for this CRUD step. Do not request read_file/list_directory/search_code unless absolutely required.',
+                ];
+            }
         }
 
         $toolWarnings[] = "Tool loop exceeded {$maxToolRounds} rounds during {$stage}.";
@@ -1053,7 +1125,7 @@ class AiAssistantService
         return [
             'content' => "I could not complete the request automatically because the tool loop exceeded the safety limit after {$maxToolRounds} rounds. ".
                 "Last requested tools: {$lastToolsText}. ".
-                'Retry with a narrower step (for example: "create Product model + migration only"), then continue step by step.',
+                'Retry with a narrower step (for example: "create model + migration only"), then continue step by step.',
             'model' => 'system:tool-loop-guard',
             'fallback_used' => $fallbackUsed,
             'warnings' => $toolWarnings,
@@ -1071,6 +1143,10 @@ class AiAssistantService
 
         if ($crudRequest) {
             return true;
+        }
+
+        if ($this->isReadOnlyFileRequest($this->lastUserMessage($messages))) {
+            return false;
         }
 
         return $this->resolveIntent($this->lastUserMessage($messages), 'auto', $messages) === 'coding';
@@ -1362,6 +1438,9 @@ class AiAssistantService
 
         $clean = preg_replace('/```json\s*\{\s*"tool_calls"[\s\S]*?```/i', '', $clean) ?? $clean;
         $clean = preg_replace('/\{\s*"tool_calls"\s*:\s*\[[\s\S]*?\]\s*\}/i', '', $clean) ?? $clean;
+        $clean = preg_replace('/```json\s*\{\s*"calls"[\s\S]*?```/i', '', $clean) ?? $clean;
+        $clean = preg_replace('/\{\s*"calls"\s*:\s*\[[\s\S]*?\]\s*\}/i', '', $clean) ?? $clean;
+        $clean = preg_replace('/^\s*\{\s*"tool"\s*:\s*"[^"]+"[\s\S]*\}\s*$/i', '', $clean) ?? $clean;
         $clean = trim($clean);
 
         if (preg_match('/<\/think>/i', $clean) === 1) {
@@ -1443,6 +1522,38 @@ class AiAssistantService
             || str_contains($normalized, 'write_file');
     }
 
+    private function isRawToolPayloadOutput(string $content): bool
+    {
+        $trimmed = trim($content);
+
+        if ($trimmed === '') {
+            return false;
+        }
+
+        /** @var mixed $decoded */
+        $decoded = json_decode($trimmed, true);
+
+        if (! is_array($decoded)
+            && preg_match('/```json\s*([\s\S]*?)\s*```/i', $trimmed, $matches) === 1
+        ) {
+            /** @var mixed $fencedDecoded */
+            $fencedDecoded = json_decode(trim((string) ($matches[1] ?? '')), true);
+            $decoded = $fencedDecoded;
+        }
+
+        if (! is_array($decoded)) {
+            return false;
+        }
+
+        if (array_key_exists('tool_calls', $decoded) || array_key_exists('calls', $decoded)) {
+            return true;
+        }
+
+        return isset($decoded['tool'])
+            && is_string($decoded['tool'])
+            && trim($decoded['tool']) !== '';
+    }
+
     /**
      * @return list<array<string, mixed>>
      */
@@ -1490,6 +1601,211 @@ class AiAssistantService
         }
 
         return preg_match('/^(hi+|hello+|hey+|heyy+|yo+|sup+|hola+|good (morning|afternoon|evening))([!.?,\s]*)$/', $normalized) === 1;
+    }
+
+    /**
+     * @return array{
+     *     reply: string,
+     *     model: string,
+     *     intent: string,
+     *     fallback_used: bool,
+     *     warnings: list<string>,
+     *     context: array{boost: bool, retrieval_chunks: int}
+     * }|null
+     */
+    private function maybeDirectFileReviewResponse(string $message): ?array
+    {
+        if (! $this->isReadOnlyFileRequest($message)) {
+            return null;
+        }
+
+        $requestedPath = $this->extractRequestedFilePath($message);
+        if ($requestedPath === null) {
+            return null;
+        }
+
+        $resolvedPath = $this->resolveRequestedFilePath($requestedPath);
+        if ($resolvedPath === null) {
+            return [
+                'reply' => "I could not find `{$requestedPath}` in common project paths. ".
+                    'Try a full relative path like `routes/ai.php`.',
+                'model' => 'system:file-review-fastpath',
+                'intent' => 'coding',
+                'fallback_used' => false,
+                'warnings' => [],
+                'context' => [
+                    'boost' => false,
+                    'retrieval_chunks' => 0,
+                ],
+            ];
+        }
+
+        $content = (string) File::get($resolvedPath);
+        $displayContent = mb_substr($content, 0, 12000);
+        $truncated = mb_strlen($content) > 12000;
+        $relativePath = ltrim(str_replace(base_path(), '', $resolvedPath), '/');
+        $extension = pathinfo($relativePath, PATHINFO_EXTENSION);
+        $language = $extension !== '' ? $extension : 'text';
+        $recommendations = $this->recommendationsForFile($relativePath, $content);
+
+        $reply = implode("\n", [
+            "Here is `{$relativePath}`:",
+            "```{$language}",
+            $displayContent,
+            '```',
+            $truncated ? '_Output truncated at 12000 chars._' : '',
+            '',
+            'Recommended updates:',
+            ...array_map(
+                fn (int $index, string $item): string => ($index + 1).'. '.$item,
+                array_keys($recommendations),
+                $recommendations
+            ),
+        ]);
+
+        return [
+            'reply' => trim($reply),
+            'model' => 'system:file-review-fastpath',
+            'intent' => 'coding',
+            'fallback_used' => false,
+            'warnings' => [],
+            'context' => [
+                'boost' => false,
+                'retrieval_chunks' => 0,
+            ],
+        ];
+    }
+
+    private function extractRequestedFilePath(string $message): ?string
+    {
+        if (preg_match(
+            '/\b([\w.\-\/]+?\.(php|ts|tsx|js|jsx|json|md|yml|yaml|env|txt|blade\.php))\b/i',
+            $message,
+            $matches
+        ) !== 1) {
+            return null;
+        }
+
+        $path = trim((string) ($matches[1] ?? ''));
+
+        if ($path === '') {
+            return null;
+        }
+
+        return ltrim($path, './');
+    }
+
+    private function resolveRequestedFilePath(string $path): ?string
+    {
+        $candidates = [];
+
+        if (str_contains($path, '/')) {
+            $candidates[] = base_path($path);
+        } else {
+            $candidates[] = base_path($path);
+            $candidates[] = base_path("routes/{$path}");
+            $candidates[] = base_path("app/{$path}");
+            $candidates[] = base_path("config/{$path}");
+            $candidates[] = base_path("resources/{$path}");
+            $candidates[] = base_path("database/{$path}");
+            $candidates[] = base_path("tests/{$path}");
+        }
+
+        foreach ($candidates as $candidate) {
+            if (File::exists($candidate) && ! File::isDirectory($candidate)) {
+                $real = realpath($candidate);
+
+                if (is_string($real) && $real !== '') {
+                    return $real;
+                }
+
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function recommendationsForFile(string $relativePath, string $content): array
+    {
+        $recommendations = [];
+        $trimmed = trim($content);
+
+        if ($trimmed === '') {
+            $recommendations[] = 'Add the expected implementation or remove the file if it is intentionally unused.';
+            $recommendations[] = 'Document why this file exists to avoid confusion for future prompts.';
+
+            return $recommendations;
+        }
+
+        if ($relativePath === 'routes/ai.php' || str_ends_with($relativePath, '/ai.php')) {
+            if (preg_match('/^\s*\/\/\s*Mcp::web\(/m', $content) === 1
+                && preg_match('/^\s*Mcp::web\(/m', $content) !== 1
+            ) {
+                $recommendations[] = 'Either uncomment and wire `Mcp::web(...)` with proper middleware, or remove this placeholder route file.';
+            }
+
+            $recommendations[] = 'If this route file is active, ensure it is loaded in bootstrap routing and protected with auth/authorization middleware.';
+            $recommendations[] = 'Add a feature test that confirms the MCP route is reachable only for authorized users.';
+
+            return $recommendations;
+        }
+
+        $recommendations[] = 'Add or update tests covering the behavior defined in this file.';
+        $recommendations[] = 'Confirm imports/usages are minimal and remove dead code/comments to reduce prompt ambiguity.';
+        $recommendations[] = 'If this file is part of runtime paths, add brief doc comments for non-obvious logic.';
+
+        return $recommendations;
+    }
+
+    private function isReadOnlyFileRequest(string $message): bool
+    {
+        $normalized = mb_strtolower(trim($message));
+
+        if ($normalized === '') {
+            return false;
+        }
+
+        $hasPathLikeTarget = preg_match(
+            '/(?:^|[\s`"\'])[\w.\-\/]+?\.(php|ts|tsx|js|jsx|json|md|yml|yaml|env|txt|blade\.php)(?:$|[\s`"\'])/i',
+            $message
+        ) === 1;
+
+        $hasStrongReadIntent = preg_match(
+            '/\b(fetch|show|display|open|read|print|cat)\b[\s\S]{0,80}\b(file|code|contents?)\b/i',
+            $normalized
+        ) === 1;
+
+        if (! $hasStrongReadIntent && ! $hasPathLikeTarget) {
+            return false;
+        }
+
+        $directEditSignals = [
+            'edit the file',
+            'update the file',
+            'modify the file',
+            'change the file',
+            'rewrite the file',
+            'replace in the file',
+            'apply changes',
+            'make changes',
+            'implement in',
+            'fix in',
+            'delete from',
+            'remove from',
+            'rename in',
+        ];
+
+        foreach ($directEditSignals as $signal) {
+            if (str_contains($normalized, $signal)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function shouldEnableWebSearchInstructions(string $message, string $intent): bool

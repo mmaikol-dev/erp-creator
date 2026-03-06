@@ -175,6 +175,63 @@ class AiAssistantController extends Controller
         ]);
     }
 
+    public function approveTaskRunStep(
+        Request $request,
+        AiTaskRun $taskRun,
+        TaskRunService $taskRuns,
+    ): JsonResponse {
+        /** @var \App\Models\User $user */
+        $user = $request->user();
+        $taskRun->loadMissing('conversation');
+
+        abort_unless($taskRun->conversation?->user_id === $user->id, 404);
+
+        $result = $taskRuns->approveCurrentStep($user, $taskRun);
+
+        return response()->json([
+            'ok' => true,
+            ...$result,
+        ]);
+    }
+
+    public function retryTaskRunStep(
+        Request $request,
+        AiTaskRun $taskRun,
+        TaskRunService $taskRuns,
+    ): JsonResponse {
+        /** @var \App\Models\User $user */
+        $user = $request->user();
+        $taskRun->loadMissing('conversation');
+
+        abort_unless($taskRun->conversation?->user_id === $user->id, 404);
+
+        $result = $taskRuns->retryCurrentStep($user, $taskRun);
+
+        return response()->json([
+            'ok' => true,
+            ...$result,
+        ]);
+    }
+
+    public function skipTaskRunStep(
+        Request $request,
+        AiTaskRun $taskRun,
+        TaskRunService $taskRuns,
+    ): JsonResponse {
+        /** @var \App\Models\User $user */
+        $user = $request->user();
+        $taskRun->loadMissing('conversation');
+
+        abort_unless($taskRun->conversation?->user_id === $user->id, 404);
+
+        $result = $taskRuns->skipCurrentStep($user, $taskRun);
+
+        return response()->json([
+            'ok' => true,
+            ...$result,
+        ]);
+    }
+
     public function pauseTaskRun(
         Request $request,
         AiTaskRun $taskRun,
@@ -248,6 +305,58 @@ class AiAssistantController extends Controller
         try {
             $message = (string) $request->string('message');
             $mode = (string) $request->input('mode', 'auto');
+            $activeRun = AiTaskRun::query()
+                ->where('ai_conversation_id', $conversation->id)
+                ->latest('id')
+                ->first();
+
+            if ($activeRun !== null && $taskRuns->shouldTreatAsContinue($message)) {
+                $continued = $taskRuns->continueRun($user, $activeRun);
+                $reply = $this->formatTaskRunContinueReply(
+                    (string) ($continued['action'] ?? 'next'),
+                    is_array($continued['result'] ?? null) ? $continued['result'] : []
+                );
+                $runPayload = is_array(($continued['result'] ?? null))
+                    ? ($continued['result']['run'] ?? null)
+                    : null;
+
+                $memory->storeMessage(
+                    conversation: $conversation,
+                    role: 'user',
+                    content: $message,
+                    mode: $mode,
+                    stage: 'task_run_continue',
+                );
+                $memory->storeMessage(
+                    conversation: $conversation,
+                    role: 'assistant',
+                    content: $reply,
+                    model: 'system:task-run-router',
+                    mode: $mode,
+                    stage: 'task_run_continue',
+                );
+
+                Log::info('ai-assistant.chat.success', [
+                    'user_id' => $user->id,
+                    'conversation_id' => $conversation->id,
+                    'model' => 'system:task-run-router',
+                    'intent' => 'task-run-continue',
+                    'fallback_used' => false,
+                    'task_run_action' => $continued['action'] ?? null,
+                    'duration_ms' => (int) ((microtime(true) - $startedAt) * 1000),
+                ]);
+
+                return response()->json([
+                    'ok' => true,
+                    'conversation_id' => $conversation->id,
+                    'reply' => $reply,
+                    'model' => 'system:task-run-router',
+                    'intent' => 'task_run_continue',
+                    'fallback_used' => false,
+                    'warnings' => [],
+                    'task_run' => $runPayload,
+                ]);
+            }
 
             if ($taskRuns->shouldAutoOrchestrate($mode, $message)) {
                 $auto = $taskRuns->runAutonomously($user, $conversation, $message);
@@ -413,6 +522,69 @@ class AiAssistantController extends Controller
                 ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
                 @ob_flush();
                 flush();
+
+                $activeRun = AiTaskRun::query()
+                    ->where('ai_conversation_id', $conversation->id)
+                    ->latest('id')
+                    ->first();
+
+                if ($activeRun !== null && $taskRuns->shouldTreatAsContinue($message)) {
+                    $continued = $taskRuns->continueRun($user, $activeRun);
+                    $reply = $this->formatTaskRunContinueReply(
+                        (string) ($continued['action'] ?? 'next'),
+                        is_array($continued['result'] ?? null) ? $continued['result'] : []
+                    );
+                    $runPayload = is_array(($continued['result'] ?? null))
+                        ? ($continued['result']['run'] ?? null)
+                        : null;
+
+                    $memory->storeMessage(
+                        conversation: $conversation,
+                        role: 'user',
+                        content: $message,
+                        mode: $mode,
+                        stage: 'task_run_continue',
+                    );
+                    $memory->storeMessage(
+                        conversation: $conversation,
+                        role: 'assistant',
+                        content: $reply,
+                        model: 'system:task-run-router',
+                        mode: $mode,
+                        stage: 'task_run_continue',
+                    );
+
+                    echo json_encode([
+                        'type' => 'chunk',
+                        'content' => $reply,
+                    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+                    @ob_flush();
+                    flush();
+
+                    Log::info('ai-assistant.chat.success', [
+                        'user_id' => $user->id,
+                        'conversation_id' => $conversation->id,
+                        'model' => 'system:task-run-router',
+                        'intent' => 'task-run-continue',
+                        'fallback_used' => false,
+                        'task_run_action' => $continued['action'] ?? null,
+                        'duration_ms' => (int) ((microtime(true) - $startedAt) * 1000),
+                        'stream' => true,
+                    ]);
+
+                    echo json_encode([
+                        'type' => 'done',
+                        'conversation_id' => $conversation->id,
+                        'model' => 'system:task-run-router',
+                        'fallback_used' => false,
+                        'warnings' => [],
+                        'task_run' => $runPayload,
+                    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+                    @ob_flush();
+                    flush();
+
+                    return;
+                }
 
                 if ($taskRuns->shouldAutoOrchestrate($mode, $message)) {
                     echo json_encode([
@@ -681,5 +853,58 @@ class AiAssistantController extends Controller
             'Cache-Control' => 'no-cache, no-transform',
             'X-Accel-Buffering' => 'no',
         ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $result
+     */
+    private function formatTaskRunContinueReply(string $action, array $result): string
+    {
+        $normalizedAction = trim(mb_strtolower($action));
+        $run = is_array($result['run'] ?? null) ? $result['run'] : [];
+        $status = is_string($run['status'] ?? null) ? (string) $run['status'] : 'unknown';
+        $currentStep = is_numeric($run['current_step_index'] ?? null)
+            ? ((int) $run['current_step_index']) + 1
+            : null;
+
+        if (isset($result['preview']) && is_array($result['preview'])) {
+            $preview = $result['preview'];
+            $title = is_string($preview['step_title'] ?? null) ? (string) $preview['step_title'] : 'Current step';
+            $changes = is_array($preview['changes'] ?? null) ? $preview['changes'] : [];
+
+            return "{$title} preview is ready (".count($changes)." file changes). ".
+                'Review and approve to apply this step.';
+        }
+
+        if (isset($result['applied'])) {
+            $applied = (bool) ($result['applied'] ?? false);
+            $rolledBack = (bool) ($result['rolled_back'] ?? false);
+
+            if ($applied) {
+                return 'Approved and applied the current step successfully. '.
+                    ($currentStep !== null ? "Current step pointer: {$currentStep}. " : '').
+                    "Run status: {$status}.";
+            }
+
+            if ($rolledBack) {
+                return 'Step apply failed validation and was rolled back automatically. '.
+                    "Run status: {$status}.";
+            }
+        }
+
+        if (isset($result['execution']) && is_array($result['execution'])) {
+            $reviewResult = is_array($result['review'] ?? null)
+                ? (string) (($result['review']['result'] ?? 'partial'))
+                : 'partial';
+
+            return "Continued task run with action '{$normalizedAction}'. ".
+                "Review result: {$reviewResult}. Run status: {$status}.";
+        }
+
+        if (is_string($result['message'] ?? null)) {
+            return (string) $result['message'];
+        }
+
+        return "Continued task run with action '{$normalizedAction}'. Run status: {$status}.";
     }
 }

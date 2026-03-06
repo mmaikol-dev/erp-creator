@@ -5,6 +5,7 @@ namespace App\Services\AiAssistant;
 use App\Models\AiConversation;
 use App\Models\AiTaskRun;
 use App\Models\User;
+use App\Services\AiAssistant\Pipeline\GenerationPipelineService;
 use RuntimeException;
 use Throwable;
 
@@ -13,12 +14,22 @@ class TaskRunService
     public function __construct(
         private AiAssistantService $assistant,
         private ConversationMemoryService $memory,
+        private GenerationPipelineService $pipeline,
     ) {
         //
     }
 
-    public function createRun(User $user, AiConversation $conversation, string $goal): AiTaskRun
+    public function createRun(
+        User $user,
+        AiConversation $conversation,
+        string $goal,
+        bool $preferPipeline = true,
+    ): AiTaskRun
     {
+        if ($preferPipeline && $this->pipeline->shouldUsePipeline($goal)) {
+            return $this->pipeline->createPipelineRun($user, $conversation, $goal);
+        }
+
         if ($conversation->user_id !== $user->id) {
             throw new RuntimeException('Conversation does not belong to the authenticated user.');
         }
@@ -103,6 +114,63 @@ class TaskRunService
         return mb_strlen($normalized) >= 220;
     }
 
+    public function shouldTreatAsContinue(string $message): bool
+    {
+        $normalized = mb_strtolower(trim($message));
+
+        if ($normalized === '') {
+            return false;
+        }
+
+        return in_array($normalized, [
+            'continue',
+            'continue.',
+            'continue please',
+            'go on',
+            'go on.',
+            'proceed',
+            'proceed.',
+            'keep going',
+            'resume',
+            'resume run',
+        ], true);
+    }
+
+    /**
+     * @return array{action: string, result: array<string, mixed>}
+     */
+    public function continueRun(User $user, AiTaskRun $run): array
+    {
+        $this->assertOwned($user, $run);
+
+        if ($run->status === 'completed') {
+            return [
+                'action' => 'none',
+                'result' => [
+                    'run' => $this->serializeRun($run),
+                    'message' => 'Task run is already completed.',
+                ],
+            ];
+        }
+
+        if ($run->status === 'paused') {
+            $run = $this->resume($user, $run);
+            $run->refresh();
+        }
+
+        if ($this->pipeline->isPipelineRun($run) && $run->status === 'needs_approval') {
+            return [
+                'action' => 'approve',
+                'result' => $this->approveCurrentStep($user, $run),
+            ];
+        }
+
+        return [
+            'action' => 'next',
+            'result' => $this->runNextStep($user, $run),
+        ];
+    }
+
     /**
      * @param  callable(array<string, mixed>): void|null  $onProgress
      * @return array{
@@ -118,7 +186,7 @@ class TaskRunService
         string $goal,
         ?callable $onProgress = null,
     ): array {
-        $run = $this->createRun($user, $conversation, $goal);
+        $run = $this->createRun($user, $conversation, $goal, false);
         $warnings = [];
         $lastExecutionReply = '';
         $maxSteps = max(1, (int) config('ai-assistant.task_runs.max_autonomous_steps', 10));
@@ -234,6 +302,10 @@ class TaskRunService
      */
     public function runNextStep(User $user, AiTaskRun $run): array
     {
+        if ($this->pipeline->isPipelineRun($run)) {
+            return $this->pipeline->previewNextStep($user, $run);
+        }
+
         $run->loadMissing('conversation');
         $conversation = $run->conversation;
 
@@ -386,6 +458,51 @@ class TaskRunService
         ];
     }
 
+    /**
+     * @return array{run: array<string, mixed>, applied: bool, rolled_back: bool, validation: array<string, mixed>, write: array<string, mixed>}
+     */
+    public function approveCurrentStep(User $user, AiTaskRun $run): array
+    {
+        if (! $this->pipeline->isPipelineRun($run)) {
+            throw new RuntimeException('Approve action is only available for deterministic pipeline runs.');
+        }
+
+        /** @var array{run: array<string, mixed>, applied: bool, rolled_back: bool, validation: array<string, mixed>, write: array<string, mixed>} $result */
+        $result = $this->pipeline->approveCurrentStep($user, $run);
+
+        return $result;
+    }
+
+    /**
+     * @return array{run: array<string, mixed>}
+     */
+    public function retryCurrentStep(User $user, AiTaskRun $run): array
+    {
+        if (! $this->pipeline->isPipelineRun($run)) {
+            throw new RuntimeException('Retry action is only available for deterministic pipeline runs.');
+        }
+
+        /** @var array{run: array<string, mixed>} $result */
+        $result = $this->pipeline->retryCurrentStep($user, $run);
+
+        return $result;
+    }
+
+    /**
+     * @return array{run: array<string, mixed>}
+     */
+    public function skipCurrentStep(User $user, AiTaskRun $run): array
+    {
+        if (! $this->pipeline->isPipelineRun($run)) {
+            throw new RuntimeException('Skip action is only available for deterministic pipeline runs.');
+        }
+
+        /** @var array{run: array<string, mixed>} $result */
+        $result = $this->pipeline->skipCurrentStep($user, $run);
+
+        return $result;
+    }
+
     public function pause(User $user, AiTaskRun $run): AiTaskRun
     {
         $this->assertOwned($user, $run);
@@ -417,6 +534,10 @@ class TaskRunService
      */
     public function serializeRun(AiTaskRun $run): array
     {
+        if ($this->pipeline->isPipelineRun($run)) {
+            return $this->pipeline->serializeRun($run);
+        }
+
         /** @var list<array<string, mixed>> $plan */
         $plan = is_array($run->plan) ? $run->plan : [];
 

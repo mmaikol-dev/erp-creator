@@ -1,1 +1,0 @@
-            $table->enum('payment_status', ['pending', 'paid', 'refunded'])->default('pending');
