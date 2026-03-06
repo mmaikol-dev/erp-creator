@@ -2,7 +2,6 @@
 
 use App\Http\Controllers\AiAssistantController;
 use App\Http\Controllers\AiAssistantLogController;
-use App\Http\Controllers\HospitalController;
 use Illuminate\Support\Facades\Route;
 use Laravel\Fortify\Features;
 
@@ -40,14 +39,6 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->name('ai-assistant.task-runs.resume');
     Route::inertia('dashboard', 'dashboard')->name('dashboard');
 
-    // Hospital Management Routes
-    Route::get('/hospitals', [HospitalController::class, 'index'])->name('hospitals.index');
-    Route::get('/hospitals/create', [HospitalController::class, 'create'])->name('hospitals.create');
-    Route::post('/hospitals', [HospitalController::class, 'store'])->name('hospitals.store');
-    Route::get('/hospitals/{hospital}', [HospitalController::class, 'show'])->name('hospitals.show');
-    Route::get('/hospitals/{hospital}/edit', [HospitalController::class, 'edit'])->name('hospitals.edit');
-    Route::put('/hospitals/{hospital}', [HospitalController::class, 'update'])->name('hospitals.update');
-    Route::delete('/hospitals/{hospital}', [HospitalController::class, 'destroy'])->name('hospitals.destroy');
 });
 
 require __DIR__.'/settings.php';

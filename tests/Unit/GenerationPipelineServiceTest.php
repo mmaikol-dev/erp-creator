@@ -21,21 +21,21 @@ function sampleCompiledSpec(): CompiledSpec
 {
     return CompiledSpec::fromLegacyArray([
         'blueprint' => 'crud_resource',
-        'source_prompt' => 'create product module',
+        'source_prompt' => 'create inventory item module',
         'module' => [
-            'name' => 'Product',
-            'name_plural' => 'Products',
-            'resource' => 'product',
-            'resource_plural' => 'products',
-            'route_slug' => 'products',
-            'table' => 'products',
-            'model_class' => 'Product',
-            'controller_class' => 'ProductController',
-            'policy_class' => 'ProductPolicy',
-            'store_request_class' => 'StoreProductRequest',
-            'update_request_class' => 'UpdateProductRequest',
-            'factory_class' => 'ProductFactory',
-            'migration_file' => '2026_01_01_000000_create_products_table.php',
+            'name' => 'InventoryItem',
+            'name_plural' => 'InventoryItems',
+            'resource' => 'inventory_item',
+            'resource_plural' => 'inventory_items',
+            'route_slug' => 'inventory_items',
+            'table' => 'inventory_items',
+            'model_class' => 'InventoryItem',
+            'controller_class' => 'InventoryItemController',
+            'policy_class' => 'InventoryItemPolicy',
+            'store_request_class' => 'StoreInventoryItemRequest',
+            'update_request_class' => 'UpdateInventoryItemRequest',
+            'factory_class' => 'InventoryItemFactory',
+            'migration_file' => '2026_01_01_000000_create_inventory_items_table.php',
         ],
         'fields' => [],
         'validation' => [
@@ -59,8 +59,8 @@ PHP;
     $inserter = new RouteInserter();
     $result = $inserter->insert($routes, sampleCompiledSpec());
 
-    expect($result)->toContain("Route::resource('products', \\App\\Http\\Controllers\\ProductController::class);");
-    expect(substr_count($result, "Route::resource('products'"))->toBe(1);
+    expect($result)->toContain("Route::resource('inventory_items', \\App\\Http\\Controllers\\InventoryItemController::class);");
+    expect(substr_count($result, "Route::resource('inventory_items'"))->toBe(1);
 });
 
 test('build changes throws when artifact path is empty', function (): void {
