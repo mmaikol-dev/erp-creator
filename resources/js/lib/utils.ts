@@ -8,5 +8,13 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function toUrl(url: NonNullable<InertiaLinkProps['href']>): string {
-    return typeof url === 'string' ? url : url.url;
+    if (typeof url === 'string') {
+        return url;
+    }
+
+    if (url && typeof url === 'object' && 'url' in url && typeof url.url === 'string') {
+        return url.url;
+    }
+
+    return '';
 }

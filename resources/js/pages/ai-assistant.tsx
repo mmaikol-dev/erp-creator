@@ -792,6 +792,8 @@ export default function AIAssistant() {
         extractPreviewFromRun(initialTaskRun),
     );
     const [taskRunBusyAction, setTaskRunBusyAction] = useState<string | null>(null);
+    const [traceEvents, setTraceEvents] = useState<string[]>([]);
+    const traceMode = true;
     const activeRequestControllerRef = useRef<AbortController | null>(null);
     const userCancelledRef = useRef(false);
     const terminalScrollRef = useRef<HTMLDivElement | null>(null);
@@ -817,6 +819,49 @@ export default function AIAssistant() {
         taskRun === null &&
         conversationId !== null &&
         looksLikeStructuredPipelineGoal(prompt);
+
+    const pushTraceEvent = (entry: string) => {
+        setTraceEvents((previous) => [
+            ...previous.slice(-149),
+            `${new Date().toLocaleTimeString()} ${entry}`,
+        ]);
+    };
+
+    const appendAssistantDelta = async (streamId: string, delta: string) => {
+        if (delta.length === 0) {
+            setMessages((previous) =>
+                previous.map((message) =>
+                    message.id === streamId
+                        ? {
+                              ...message,
+                              content: message.content + delta,
+                          }
+                        : message,
+                ),
+            );
+
+            return;
+        }
+
+        for (const character of delta) {
+            if (activeRequestControllerRef.current?.signal.aborted) {
+                break;
+            }
+
+            setMessages((previous) =>
+                previous.map((message) =>
+                    message.id === streamId
+                        ? {
+                              ...message,
+                              content: message.content + character,
+                          }
+                        : message,
+                ),
+            );
+
+            await new Promise((resolve) => window.setTimeout(resolve, 8));
+        }
+    };
 
     useEffect(() => {
         if (!isSending || requestStartedAt === null) {
@@ -956,12 +1001,14 @@ export default function AIAssistant() {
         }
         typedCommandTimersRef.current = [];
         setPlanningPreview('');
+        setTraceEvents([]);
         setIsSending(true);
 
         try {
             const controller = new AbortController();
             activeRequestControllerRef.current = controller;
             userCancelledRef.current = false;
+            pushTraceEvent(`request started mode=${mode}`);
             const requestTimeoutMs =
                 mode === 'deep'
                     ? DEEP_MODE_TIMEOUT_MS
@@ -1057,23 +1104,18 @@ export default function AIAssistant() {
 
                         if (event.type === 'chunk') {
                             setStreamedChars((previous) => previous + event.content.length);
-                            setMessages((previous) =>
-                                previous.map((message) =>
-                                    message.id === streamId
-                                        ? {
-                                              ...message,
-                                              content:
-                                                  message.content +
-                                                  event.content,
-                                          }
-                                        : message,
-                                ),
-                            );
+                            await appendAssistantDelta(streamId, event.content);
+                            if (traceMode) {
+                                pushTraceEvent(`assistant delta +${event.content.length} chars`);
+                            }
                         }
 
                         if (event.type === 'plan_chunk') {
                             setPlanningPreview((previous) => previous + event.content);
                             setStreamedChars((previous) => previous + event.content.length);
+                            if (traceMode) {
+                                pushTraceEvent(`plan delta +${event.content.length} chars`);
+                            }
                         }
 
                         if (event.type === 'done') {
@@ -1120,6 +1162,11 @@ export default function AIAssistant() {
                                 event.task_run && typeof event.task_run === 'object'
                                     ? event.task_run
                                     : null;
+                            if (traceMode) {
+                                pushTraceEvent(
+                                    `done model=${finalModel ?? 'unknown'} fallback=${finalFallbackUsed ? 'yes' : 'no'}`,
+                                );
+                            }
                         }
 
                         if (event.type === 'tool_activity') {
@@ -1225,6 +1272,9 @@ export default function AIAssistant() {
                                     ...previous.slice(-14),
                                     `[${roundText}] requested: ${summary}`,
                                 ]);
+                                if (traceMode) {
+                                    pushTraceEvent(`[tools] ${summary}`);
+                                }
                             } else if (
                                 event.phase === 'tool_results' &&
                                 Array.isArray(event.results)
@@ -1248,11 +1298,17 @@ export default function AIAssistant() {
                                     ...previous.slice(-14),
                                     `[${roundText}] results: ${summary}`,
                                 ]);
+                                if (traceMode) {
+                                    pushTraceEvent(`[results] ${summary}`);
+                                }
                             } else if (event.phase === 'bootstrap') {
                                 setToolActivity((previous) => [
                                     ...previous.slice(-14),
                                     'Bootstrap snapshot prepared.',
                                 ]);
+                                if (traceMode) {
+                                    pushTraceEvent('bootstrap snapshot prepared');
+                                }
                             } else if (
                                 event.phase === 'autonomous_run'
                             ) {
@@ -1349,6 +1405,9 @@ export default function AIAssistant() {
 
                                     return [...previous.slice(-5), nextStatus];
                                 });
+                                if (traceMode) {
+                                    pushTraceEvent(`status=${nextStatus}`);
+                                }
                             }
                         }
 
@@ -1387,8 +1446,12 @@ export default function AIAssistant() {
                         ? 'Request stopped.'
                         : `Request timed out after ${Math.floor((mode === 'deep' ? DEEP_MODE_TIMEOUT_MS : FAST_MODE_TIMEOUT_MS) / 1000)} seconds. ${mode === 'deep' ? 'Deep mode runs two model passes and can take longer; try Fast mode for quicker replies.' : 'The server/model is still taking too long; check Ollama/server health and try again.'}`
                     : error instanceof Error
-                      ? error.message
-                      : 'Unexpected assistant error.';
+                    ? error.message
+                    : 'Unexpected assistant error.';
+
+            if (traceMode) {
+                pushTraceEvent(`error: ${message}`);
+            }
 
             setMessages((previous) => [
                 ...previous,
@@ -1403,6 +1466,9 @@ export default function AIAssistant() {
             userCancelledRef.current = false;
             setStreamStatus(null);
             setIsSending(false);
+            if (traceMode) {
+                pushTraceEvent('request finished');
+            }
         }
     };
 
@@ -2318,6 +2384,39 @@ export default function AIAssistant() {
                                 )}
                             </div>
                             <div className="flex min-h-[280px] flex-1 flex-col">
+                                {(isSending || traceEvents.length > 0) && (
+                                    <>
+                                        <div className="flex items-center justify-between border-b px-4 py-3">
+                                            <h3 className="text-sm font-semibold">Live Trace</h3>
+                                            <Button
+                                                size="sm"
+                                                variant="ghost"
+                                                onClick={() => setTraceEvents([])}
+                                                disabled={traceEvents.length === 0}
+                                            >
+                                                Clear
+                                            </Button>
+                                        </div>
+                                        <div className="max-h-48 overflow-y-auto border-b bg-muted/20 p-3 text-xs">
+                                            {traceEvents.length === 0 ? (
+                                                <p className="text-muted-foreground">
+                                                    Trace timeline will appear while generating.
+                                                </p>
+                                            ) : (
+                                                <div className="space-y-1">
+                                                    {traceEvents.map((entry, index) => (
+                                                        <p
+                                                            key={`trace-entry-${index}`}
+                                                            className="font-mono text-muted-foreground"
+                                                        >
+                                                            {entry}
+                                                        </p>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </>
+                                )}
                                 <div className="flex items-center justify-between border-b px-4 py-3">
                                     <div className="inline-flex items-center gap-2">
                                         <TerminalSquare className="size-4 text-muted-foreground" />
