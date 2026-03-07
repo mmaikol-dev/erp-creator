@@ -328,10 +328,13 @@ class AiAssistantService
 
         if ($this->isCrudScaffoldRequest($message)) {
             $systemPrompt[] = $this->crudScaffoldInstructions();
+        }
+
+        if ($this->shouldIncludePageTemplateReference($message, $intent, $executionPlan)) {
             $templateReference = $this->pageTemplateReferenceText();
 
             if ($templateReference !== '') {
-                $systemPrompt[] = 'Canonical page template reference (must follow this structure for new pages):';
+                $systemPrompt[] = 'Canonical page template reference (strict): when creating or updating Inertia pages, follow this structure and component patterns unless the user explicitly asks for a different layout.';
                 $systemPrompt[] = $templateReference;
             }
         }
@@ -502,11 +505,65 @@ class AiAssistantService
             'full stack page',
             'create module',
             'build module',
+            'add, view, edit, and delete',
+            'add, view, edit, delete',
+            'add view edit delete',
+            'add and edit and delete',
+            'create, read, update, delete',
+            'create read update delete',
+            'add/edit/delete',
+            'add edit delete',
         ];
 
         foreach ($needles as $needle) {
             if (str_contains($normalized, $needle)) {
                 return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function shouldIncludePageTemplateReference(
+        string $message,
+        string $intent,
+        ?string $executionPlan = null,
+    ): bool {
+        if ($this->isCrudScaffoldRequest($message)) {
+            return true;
+        }
+
+        if ($intent !== 'coding') {
+            return false;
+        }
+
+        $normalized = mb_strtolower($message);
+        $pageNeedles = [
+            'page',
+            'inertia',
+            'frontend',
+            'front-end',
+            'ui',
+            'screen',
+            'dashboard',
+            'form',
+            'table',
+            'modal',
+            'sidebar',
+        ];
+
+        foreach ($pageNeedles as $needle) {
+            if (str_contains($normalized, $needle)) {
+                return true;
+            }
+        }
+
+        if ($executionPlan !== null) {
+            $plan = mb_strtolower($executionPlan);
+            foreach ($pageNeedles as $needle) {
+                if (str_contains($plan, $needle)) {
+                    return true;
+                }
             }
         }
 

@@ -22,6 +22,40 @@ Task Management:
 - Keep final responses concise and clean; avoid decorative emojis and promotional filler text.
 - For web-derived answers, include a clear Sources section with direct URLs.
 
+Frontend UI Rules (Universal):
+- Theme baseline:
+  - Use the default shadcn UI visual system already present in this project.
+  - Do not invent a custom theme or override global design tokens unless the user explicitly requests it.
+- Typography system:
+  - Use a consistent heading/body scale across new pages.
+  - Prefer existing project font tokens/classes; do not introduce one-off font utilities unless already established.
+  - Keep heading hierarchy semantic (`h1`/`h2`) and visually distinct.
+- Color tokens:
+  - Use semantic project tokens/utilities (surface, muted, border, accent, destructive, success, warning); avoid hard-coded hex colors in page JSX.
+  - Keep contrast accessible; avoid low-contrast text on muted backgrounds.
+- Spacing rhythm:
+  - Use consistent spacing steps (`gap-*`, `space-y-*`, `p-*`) and align with nearby page patterns.
+  - Favor simple, repeatable layout spacing over ad-hoc pixel values.
+- Mobile-first:
+  - Start with base (mobile) layout; enhance at `sm/md/lg`.
+  - Prevent horizontal overflow on small screens.
+  - Tables/lists must remain usable on narrow viewports (stacking, wrapping, or horizontal scroll container).
+- Accessibility:
+  - Every interactive control needs a visible label or `aria-label`.
+  - Inputs must be associated with labels and error/help text.
+  - Ensure keyboard focus visibility and logical tab order.
+  - Use meaningful empty/loading/error states (not blank containers).
+- Reuse-first:
+  - Prefer existing components in `resources/js/components` and `resources/js/components/ui` before creating new primitives.
+  - Match existing page/layout conventions before introducing new structure.
+- Feedback patterns:
+  - For CRUD actions, use toast notifications for both success and error outcomes.
+  - Use project modal components (`Dialog` / `AlertDialog`) for confirm flows (delete, destructive actions, multi-step confirmations).
+  - Use `Badge` for concise status labels (active/inactive, draft/published, role/state metadata).
+  - For page-level loading states, use `Skeleton` placeholders from `@/components/ui/skeleton`.
+  - Always show loading icons (spinner/loader) while create/update/delete actions are processing.
+  - Disable submit/action buttons while processing to prevent duplicate writes.
+
 CRUD Delivery Contract:
 - If the user asks to create/build/generate a page or resource, treat it as a full CRUD scaffold unless they explicitly request partial scope.
 - Deliver all required pieces: routes, controller methods, requests/validation, model (if missing), migration (if missing), and Inertia/React pages.
