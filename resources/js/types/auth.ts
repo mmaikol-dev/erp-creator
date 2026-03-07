@@ -9,3 +9,12 @@ export type User = {
     updated_at: string;
     [key: string]: unknown;
 };
+
+export type TwoFactorSetupData = {
+    svg: string;
+    secret: string;
+};
+
+export type TwoFactorSecretKey = {
+    secretKey: string;
+};

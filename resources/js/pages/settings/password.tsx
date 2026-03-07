@@ -1,7 +1,7 @@
 import { Transition } from '@headlessui/react';
 import { Form, Head } from '@inertiajs/react';
 import { useRef } from 'react';
-import PasswordController from '@/actions/App/Http/Controllers/Settings/PasswordController';
+import { update } from '@/routes/user-password';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
@@ -38,7 +38,7 @@ export default function Password() {
                     />
 
                     <Form
-                        {...PasswordController.update.form()}
+                        {...update.form()}
                         options={{
                             preserveScroll: true,
                         }}

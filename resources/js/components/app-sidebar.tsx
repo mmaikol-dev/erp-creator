@@ -26,6 +26,11 @@ const mainNavItems: NavItem[] = [
         href: '/ai-assistant/logs',
         icon: ScrollText,
     },
+    {
+        title: 'Suppliers',
+        href: '/suppliers',
+        icon: LayoutGrid,
+    },
 ];
 
 const footerNavItems: NavItem[] = [

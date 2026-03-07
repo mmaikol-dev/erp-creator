@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AiAssistantController;
 use App\Http\Controllers\AiAssistantLogController;
+use App\Http\Controllers\SupplierController;
 use Illuminate\Support\Facades\Route;
 use Laravel\Fortify\Features;
 
@@ -38,6 +39,9 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::post('ai-assistant/task-runs/{taskRun}/resume', [AiAssistantController::class, 'resumeTaskRun'])
         ->name('ai-assistant.task-runs.resume');
     Route::inertia('dashboard', 'dashboard')->name('dashboard');
+
+    // Suppliers CRUD
+    Route::resource('suppliers', SupplierController::class)->except(['create', 'edit', 'show']);
 
 });
 
