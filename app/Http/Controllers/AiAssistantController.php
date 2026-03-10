@@ -299,12 +299,12 @@ class AiAssistantController extends Controller
             'message_length' => mb_strlen((string) $request->input('message', '')),
             'history_count' => count($history),
             'memory_snippets_count' => count($memorySnippets),
-            'mode' => (string) $request->input('mode', 'auto'),
+            'mode' => (string) $request->input('mode', 'deep'),
         ]);
 
         try {
             $message = (string) $request->string('message');
-            $mode = (string) $request->input('mode', 'auto');
+            $mode = (string) $request->input('mode', 'deep');
             $activeRun = AiTaskRun::query()
                 ->where('ai_conversation_id', $conversation->id)
                 ->latest('id')
@@ -430,9 +430,10 @@ class AiAssistantController extends Controller
                 model: is_string($result['model'] ?? null) ? $result['model'] : null,
                 mode: $mode,
                 stage: 'execution',
-                meta: [
+                meta: array_filter([
                     'fallback_used' => (bool) ($result['fallback_used'] ?? false),
-                ],
+                    ...((is_array($result['meta'] ?? null) ? $result['meta'] : [])),
+                ], static fn ($value): bool => $value !== null),
             );
 
             Log::info('ai-assistant.chat.success', [
@@ -472,7 +473,7 @@ class AiAssistantController extends Controller
     }
 
     /**
-     * Stream an AI chat response for fast mode.
+     * Stream an AI chat response.
      */
     public function chatStream(
         AiAssistantChatRequest $request,
@@ -489,7 +490,7 @@ class AiAssistantController extends Controller
         );
         $history = $memory->chatHistory($conversation, 20);
         $message = (string) $request->string('message');
-        $mode = (string) $request->input('mode', 'auto');
+        $mode = (string) $request->input('mode', 'deep');
         $memorySnippets = $memory->relevantMemories($conversation, $message, 4);
 
         Log::info('ai-assistant.chat.request', [
@@ -798,10 +799,11 @@ class AiAssistantController extends Controller
                     content: (string) $result['reply'],
                     model: is_string($result['model'] ?? null) ? $result['model'] : null,
                     mode: $mode,
-                    stage: 'execution',
-                    meta: [
+                stage: 'execution',
+                    meta: array_filter([
                         'fallback_used' => (bool) ($result['fallback_used'] ?? false),
-                    ],
+                        ...((is_array($result['meta'] ?? null) ? $result['meta'] : [])),
+                    ], static fn ($value): bool => $value !== null),
                 );
 
                 Log::info('ai-assistant.chat.success', [
@@ -823,6 +825,7 @@ class AiAssistantController extends Controller
                     'plan_model' => is_string($result['plan_model'] ?? null) ? $result['plan_model'] : null,
                     'thinking' => is_string($result['thinking'] ?? null) ? $result['thinking'] : null,
                     'plan_thinking' => is_string($result['plan_thinking'] ?? null) ? $result['plan_thinking'] : null,
+                    'meta' => is_array($result['meta'] ?? null) ? $result['meta'] : null,
                     'warnings' => $result['warnings'] ?? [],
                 ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
                 @ob_flush();

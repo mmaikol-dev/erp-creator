@@ -24,7 +24,7 @@ class AiAssistantChatRequest extends FormRequest
     {
         return [
             'message' => ['required', 'string', 'max:3000'],
-            'mode' => ['nullable', Rule::in(['auto', 'planning', 'coding', 'deep'])],
+            'mode' => ['nullable', Rule::in(['deep'])],
             'conversation_id' => ['nullable', 'integer'],
             'history' => ['nullable', 'array', 'max:20'],
             'history.*.role' => ['required_with:history', Rule::in(['user', 'assistant'])],

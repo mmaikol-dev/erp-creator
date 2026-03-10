@@ -2,7 +2,6 @@
 
 namespace App\Services\AiAssistant;
 
-use App\Support\AiAssistantWorkflowSkill;
 use Illuminate\Support\Facades\File;
 use RuntimeException;
 use Throwable;
@@ -14,6 +13,7 @@ class AiAssistantService
         private BoostContextService $boostContext,
         private ProjectContextRetriever $retriever,
         private FilesystemToolService $filesystemTools,
+        private OrderAssistantService $orderAssistant,
     ) {
         //
     }
@@ -36,12 +36,17 @@ class AiAssistantService
     public function respond(
         string $message,
         array $history = [],
-        string $mode = 'auto',
+        string $mode = 'deep',
         array $memorySnippets = [],
     ): array
     {
-        if ($mode !== 'deep' && $this->isSimpleGreeting($message)) {
+        if ($this->isSimpleGreeting($message)) {
             return $this->greetingResponse();
+        }
+
+        $orderResponse = $this->orderAssistant->respond($message, $history);
+        if ($orderResponse !== null) {
+            return $orderResponse;
         }
 
         $directFileReview = $this->maybeDirectFileReviewResponse($message);
@@ -129,15 +134,27 @@ class AiAssistantService
     public function streamRespond(
         string $message,
         array $history = [],
-        string $mode = 'auto',
+        string $mode = 'deep',
         array $memorySnippets = [],
         ?callable $onChunk = null,
         ?callable $onStatus = null,
         ?callable $onToolActivity = null,
         ?callable $onPlanChunk = null,
     ): array {
-        if ($mode !== 'deep' && $this->isSimpleGreeting($message)) {
+        if ($this->isSimpleGreeting($message)) {
             return $this->greetingResponse($onChunk);
+        }
+
+        $orderResponse = $this->orderAssistant->respond($message, $history);
+        if ($orderResponse !== null) {
+            if ($onChunk !== null) {
+                $onChunk($orderResponse['reply']);
+            }
+            if ($onStatus !== null) {
+                $onStatus('finalizing');
+            }
+
+            return $orderResponse;
         }
 
         $directFileReview = $this->maybeDirectFileReviewResponse($message);
@@ -265,20 +282,17 @@ class AiAssistantService
 
         $safeHistory = array_slice($safeHistory, -12);
         $systemPrompt = [
-            'You are an AI assistant embedded in a Laravel application.',
+            'You are the RealDeal Logistics office assistant.',
             "Task mode: {$intent}.",
-            'Routing policy:',
-            '- Planning and reasoning primary model: glm-5:cloud',
-            '- Coding and execution primary model: qwen3-coder-next:cloud',
-            '- Embeddings model for retrieval: qwen3-embedding:0.6b',
-            'Use the provided project context directly and avoid guessing framework structure.',
+            'Primary responsibilities:',
+            '- Help employees with orders, merchants, deliveries, statuses, customer details, and office operations.',
+            '- Prefer concise operational answers over technical explanations.',
+            '- If a query is ambiguous, ask one short clarifying question.',
             'Response style contract:',
             '- Keep final responses concise, clean, and practical.',
             '- Avoid decorative emojis, hype language, and marketing-style closers.',
             '- Prefer short bullets over long narrative paragraphs.',
             '- When web_search is used, include a final "Sources" section with plain URL citations.',
-            'Follow this skill rigorously:',
-            AiAssistantWorkflowSkill::text(),
         ];
 
         if ((bool) config('ai-assistant.tools.web_search.enabled', false)
@@ -1206,7 +1220,7 @@ class AiAssistantService
             return false;
         }
 
-        return $this->resolveIntent($this->lastUserMessage($messages), 'auto', $messages) === 'coding';
+        return $this->resolveIntent($this->lastUserMessage($messages), 'deep', $messages) === 'coding';
     }
 
     /**
@@ -1686,7 +1700,7 @@ class AiAssistantService
             return [
                 'reply' => "I could not find `{$requestedPath}` in common project paths. ".
                     'Try a full relative path like `routes/ai.php`.',
-                'model' => 'system:file-review-fastpath',
+                'model' => 'system:file-review-shortcut',
                 'intent' => 'coding',
                 'fallback_used' => false,
                 'warnings' => [],
@@ -1722,7 +1736,7 @@ class AiAssistantService
 
         return [
             'reply' => trim($reply),
-            'model' => 'system:file-review-fastpath',
+            'model' => 'system:file-review-shortcut',
             'intent' => 'coding',
             'fallback_used' => false,
             'warnings' => [],
@@ -1918,7 +1932,7 @@ class AiAssistantService
      */
     private function greetingResponse(?callable $onChunk = null): array
     {
-        $reply = 'Hey! I am here. Tell me what you want to build, fix, or debug in this project.';
+        $reply = 'Tell me which orders, merchants, deliveries, or office details you want to check.';
 
         if ($onChunk !== null) {
             $onChunk($reply);
@@ -1926,7 +1940,7 @@ class AiAssistantService
 
         return [
             'reply' => $reply,
-            'model' => 'system:greeting-fastpath',
+            'model' => 'system:greeting-shortcut',
             'intent' => 'planning',
             'fallback_used' => false,
             'warnings' => [],

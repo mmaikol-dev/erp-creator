@@ -23,6 +23,9 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
+        'roles',
+        "store_address",
+
     ];
 
     /**
@@ -56,3 +59,9 @@ class User extends Authenticatable
         return $this->hasMany(AiConversation::class);
     }
 }
+
+
+
+
+
+

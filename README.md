@@ -5,7 +5,7 @@ This project is a Laravel + Inertia AI assistant with:
 - conversation persistence in MySQL
 - model routing (planning vs coding)
 - deep mode (plan then execute)
-- streaming responses for both Fast and Deep modes over `/ai-assistant/chat/stream`
+- streaming responses over `/ai-assistant/chat/stream`
 - live stream status trail and live tool activity feed in the UI
 - optional Laravel Boost context injection
 - embedding-based retrieval and conversation memory snippets
@@ -93,7 +93,7 @@ sequenceDiagram
     C-->>UI: JSON response
 ```
 
-### 3) Stream path (current primary path for Fast + Deep)
+### 3) Stream path (current primary path)
 
 ```mermaid
 sequenceDiagram
@@ -207,10 +207,8 @@ Main UI file: `resources/js/pages/ai-assistant.tsx`
 
 Current behavior:
 - loads initial `conversationId`, `messages`, and `conversations` from Inertia props
-- supports modes:
-  - `Fast` (`mode=auto`)
-  - `Deep` (`mode=deep`)
-- sends NDJSON request to `/ai-assistant/chat/stream` for both fast and deep modes
+- supports deep mode only (`mode=deep`)
+- sends NDJSON request to `/ai-assistant/chat/stream`
 - renders live status trail and tool execution feed while streaming
 - assistant messages include a `Details` toggle; Deep mode can show planning content there, and optional thinking when enabled
 - supports `New chat` button:
@@ -222,7 +220,7 @@ Current behavior:
   - loads historical messages into chat pane
 
 Important note:
-- Fast mode uses the stream endpoint, but tool calls are resolved server-side before final text is emitted to the UI, so users should not see raw `tool_calls` JSON.
+- The stream endpoint resolves tool calls server-side before final text is emitted to the UI, so users should not see raw `tool_calls` JSON.
 
 UI elements currently not wired:
 - `Attach`

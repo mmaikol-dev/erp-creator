@@ -22,12 +22,20 @@ import {
     CollapsibleContent,
     CollapsibleTrigger,
 } from '@/components/ui/collapsible';
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+} from '@/components/ui/table';
 import AppLayout from '@/layouts/app-layout';
 import type { BreadcrumbItem } from '@/types';
 
 const breadcrumbs: BreadcrumbItem[] = [
     {
-        title: 'AI Assistant',
+        title: 'RealDeal Assistant',
         href: '/ai-assistant',
     },
 ];
@@ -43,9 +51,15 @@ type Message = {
     planModel?: string;
     thinking?: string;
     planThinking?: string;
+    meta?: Record<string, unknown>;
 };
 
-type AssistantMode = 'auto' | 'deep';
+type OrderTablePayload = {
+    headers: string[];
+    rows: string[][];
+};
+
+type AssistantMode = 'deep';
 
 type ConversationSummary = {
     id: number;
@@ -164,7 +178,7 @@ type StreamEvent =
           type: 'heartbeat';
           status?: string;
       }
-    | {
+      | {
           type: 'done';
           conversation_id?: number;
           model?: string;
@@ -173,6 +187,7 @@ type StreamEvent =
           plan_model?: string | null;
           thinking?: string | null;
           plan_thinking?: string | null;
+          meta?: Record<string, unknown> | null;
           warnings?: string[];
           task_run?: TaskRunPayload | null;
           task_run_action?: string | null;
@@ -224,6 +239,7 @@ type AssistantPageProps = {
 type FormattedBlock =
     | { type: 'h1' | 'h2' | 'h3' | 'p' | 'quote'; lines: string[] }
     | { type: 'ul' | 'ol'; items: string[] }
+    | { type: 'table'; headers: string[]; rows: string[][] }
     | { type: 'code'; lines: string[] };
 
 type TerminalLine = {
@@ -232,93 +248,54 @@ type TerminalLine = {
     text: string;
 };
 
-const FAST_MODE_TIMEOUT_MS = 600000;
 const DEEP_MODE_TIMEOUT_MS = 900000;
 
 function streamStatusLabel(status: string | null, mode: AssistantMode): string {
-    if (mode === 'deep') {
-        return (
-            {
-                starting: 'Deep mode: starting...',
-                building_context: 'Deep mode: building context...',
-                retrieving_context: 'Deep mode: retrieving context...',
-                planning: 'Deep mode: planning...',
-                executing: 'Deep mode: executing...',
-                running_tools: 'Deep mode: running tools...',
-                verifying_typescript: 'Deep mode: verifying TypeScript...',
-                autonomous_planning: 'Deep mode: autonomous planning...',
-                autonomous_run_created: 'Deep mode: autonomous run created...',
-                autonomous_step_started: 'Deep mode: executing autonomous step...',
-                autonomous_step_reviewed: 'Deep mode: reviewing autonomous step...',
-                finalizing: 'Deep mode: finalizing...',
-            }[status ?? ''] ?? 'Deep mode: planning and executing...'
-        );
-    }
-
     return (
         {
-            starting: 'Starting...',
-            bootstrap_tools: 'Bootstrapping project snapshot...',
-            building_context: 'Loading app context...',
-            retrieving_context: 'Retrieving project context...',
-            model_round_1: 'Thinking...',
-            model_round_2: 'Second pass...',
-            model_round_3: 'Refining response...',
-            running_tools: 'Running tools...',
-            verifying_typescript: 'Running TypeScript checks...',
-            finalizing: 'Finalizing...',
-        }[status ?? ''] ?? 'Thinking...'
+            starting: 'Deep mode: starting...',
+            building_context: 'Deep mode: building context...',
+            retrieving_context: 'Deep mode: retrieving context...',
+            planning: 'Deep mode: planning...',
+            executing: 'Deep mode: executing...',
+            running_tools: 'Deep mode: running tools...',
+            verifying_typescript: 'Deep mode: verifying TypeScript...',
+            autonomous_planning: 'Deep mode: autonomous planning...',
+            autonomous_run_created: 'Deep mode: autonomous run created...',
+            autonomous_step_started: 'Deep mode: executing autonomous step...',
+            autonomous_step_reviewed: 'Deep mode: reviewing autonomous step...',
+            finalizing: 'Deep mode: finalizing...',
+        }[status ?? ''] ?? 'Deep mode: planning and executing...'
     );
 }
 
 function streamStatusDetail(status: string | null, mode: AssistantMode): string {
-    if (mode === 'deep') {
-        return (
-            {
-                starting: 'Preparing deep-mode context.',
-                building_context:
-                    'Collecting app/framework context before planning.',
-                retrieving_context:
-                    'Retrieving indexed project context (time-limited).',
-                planning:
-                    'Running planning stage before code generation. This can take longer.',
-                executing:
-                    'Running execution stage based on the plan.',
-                running_tools:
-                    'Executing requested tools for implementation.',
-                verifying_typescript:
-                    'Validating generated TypeScript before final response.',
-                autonomous_planning:
-                    'Deciding and preparing autonomous step-by-step execution.',
-                autonomous_run_created:
-                    'Step plan created. Running without manual input.',
-                autonomous_step_started:
-                    'Executing the current planned step.',
-                autonomous_step_reviewed:
-                    'Reviewing completed step before moving forward.',
-                finalizing: 'Saving and returning final deep-mode response.',
-            }[status ?? ''] ??
-            'Deep mode runs a planning stage before execution, so this can take longer.'
-        );
-    }
-
     return (
         {
-            starting: 'Preparing context and contacting model...',
-            bootstrap_tools:
-                'Collecting initial project file map so tool calls can start faster.',
-            building_context: 'Collecting framework context (routes/app info)...',
+            starting: 'Preparing deep-mode context.',
+            building_context:
+                'Collecting app/framework context before planning.',
             retrieving_context:
-                'Retrieving project snippets (index/embeddings). First request can be slower.',
-            model_round_1: 'Model is generating response...',
-            model_round_2: 'Fallback/second model pass in progress...',
-            model_round_3: 'Additional model pass in progress...',
+                'Retrieving indexed project context (time-limited).',
+            planning:
+                'Running planning stage before code generation. This can take longer.',
+            executing:
+                'Running execution stage based on the plan.',
             running_tools:
-                'Model requested file/code tools. Server is executing them now.',
+                'Executing requested tools for implementation.',
             verifying_typescript:
                 'Validating generated TypeScript before final response.',
-            finalizing: 'Assembling final response for display...',
-        }[status ?? ''] ?? 'Model is working...'
+            autonomous_planning:
+                'Deciding and preparing autonomous step-by-step execution.',
+            autonomous_run_created:
+                'Step plan created. Running without manual input.',
+            autonomous_step_started:
+                'Executing the current planned step.',
+            autonomous_step_reviewed:
+                'Reviewing completed step before moving forward.',
+            finalizing: 'Saving and returning final deep-mode response.',
+        }[status ?? ''] ??
+        'Deep mode runs a planning stage before execution, so this can take longer.'
     );
 }
 
@@ -565,7 +542,31 @@ function buildFormattedBlocks(content: string): FormattedBlock[] {
         activeListItems = [];
     };
 
-    for (const rawLine of lines) {
+    const parseTableRow = (line: string): string[] | null => {
+        const trimmed = line.trim();
+
+        if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) {
+            return null;
+        }
+
+        return trimmed
+            .slice(1, -1)
+            .split('|')
+            .map((cell) => cell.trim());
+    };
+
+    const isTableSeparator = (line: string, columnCount: number): boolean => {
+        const cells = parseTableRow(line);
+
+        if (cells === null || cells.length !== columnCount) {
+            return false;
+        }
+
+        return cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+    };
+
+    for (let index = 0; index < lines.length; index++) {
+        const rawLine = lines[index];
         const line = rawLine.trimEnd();
         const trimmed = line.trim();
 
@@ -638,6 +639,40 @@ function buildFormattedBlocks(content: string): FormattedBlock[] {
                 activeListType = 'ol';
             }
             activeListItems.push(orderedMatch[1].trim());
+            continue;
+        }
+
+        const headerCells = parseTableRow(trimmed);
+        const separatorLine = lines[index + 1]?.trim() ?? '';
+        if (
+            headerCells !== null &&
+            headerCells.length > 1 &&
+            isTableSeparator(separatorLine, headerCells.length)
+        ) {
+            flushParagraph();
+            flushQuote();
+            flushList();
+
+            const rows: string[][] = [];
+            index += 2;
+
+            while (index < lines.length) {
+                const rowCells = parseTableRow(lines[index] ?? '');
+                if (rowCells === null || rowCells.length !== headerCells.length) {
+                    index -= 1;
+                    break;
+                }
+
+                rows.push(rowCells);
+                index++;
+            }
+
+            blocks.push({
+                type: 'table',
+                headers: headerCells,
+                rows,
+            });
+
             continue;
         }
 
@@ -715,6 +750,50 @@ function FormattedAssistantMessage({ content }: { content: string }) {
                     );
                 }
 
+                if (block.type === 'table') {
+                    return (
+                        <div
+                            key={key}
+                            className="overflow-hidden rounded-xl border bg-card shadow-sm"
+                        >
+                            <Table className="text-xs">
+                                <TableHeader>
+                                    <TableRow className="bg-muted/50 hover:bg-muted/50">
+                                        {block.headers.map((header, headerIndex) => (
+                                            <TableHead
+                                                key={`${key}-header-${headerIndex}`}
+                                                className="h-9 whitespace-nowrap px-3 text-[11px] font-semibold uppercase tracking-wide"
+                                            >
+                                                {renderInlineText(
+                                                    header,
+                                                    `${key}-header-${headerIndex}`,
+                                                )}
+                                            </TableHead>
+                                        ))}
+                                    </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                    {block.rows.map((row, rowIndex) => (
+                                        <TableRow key={`${key}-row-${rowIndex}`}>
+                                            {row.map((cell, cellIndex) => (
+                                                <TableCell
+                                                    key={`${key}-cell-${rowIndex}-${cellIndex}`}
+                                                    className="max-w-[160px] px-3 py-2 align-top text-[12px] leading-5"
+                                                >
+                                                    {renderInlineText(
+                                                        cell,
+                                                        `${key}-cell-${rowIndex}-${cellIndex}`,
+                                                    )}
+                                                </TableCell>
+                                            ))}
+                                        </TableRow>
+                                    ))}
+                                </TableBody>
+                            </Table>
+                        </div>
+                    );
+                }
+
                 if (block.type === 'ul' || block.type === 'ol') {
                     const ListTag = block.type === 'ul' ? 'ul' : 'ol';
                     return (
@@ -749,6 +828,68 @@ function FormattedAssistantMessage({ content }: { content: string }) {
     );
 }
 
+function extractOrderTable(meta: Record<string, unknown> | undefined): OrderTablePayload | null {
+    const table = meta?.order_table;
+
+    if (!table || typeof table !== 'object') {
+        return null;
+    }
+
+    const headers = Array.isArray((table as { headers?: unknown }).headers)
+        ? ((table as { headers: unknown[] }).headers.filter(
+              (value): value is string => typeof value === 'string',
+          ) as string[])
+        : [];
+    const rows = Array.isArray((table as { rows?: unknown }).rows)
+        ? ((table as { rows: unknown[] }).rows
+              .filter((row): row is unknown[] => Array.isArray(row))
+              .map((row) =>
+                  row.filter((value): value is string => typeof value === 'string'),
+              ) as string[][])
+        : [];
+
+    if (headers.length === 0 || rows.length === 0) {
+        return null;
+    }
+
+    return { headers, rows };
+}
+
+function AssistantOrderTable({ table }: { table: OrderTablePayload }) {
+    return (
+        <div className="mt-3 overflow-hidden rounded-xl border bg-card shadow-sm">
+            <Table className="text-xs">
+                <TableHeader>
+                    <TableRow className="bg-muted/50 hover:bg-muted/50">
+                        {table.headers.map((header, index) => (
+                            <TableHead
+                                key={`order-table-header-${index}`}
+                                className="h-9 whitespace-nowrap px-3 text-[11px] font-semibold uppercase tracking-wide"
+                            >
+                                {header}
+                            </TableHead>
+                        ))}
+                    </TableRow>
+                </TableHeader>
+                <TableBody>
+                    {table.rows.map((row, rowIndex) => (
+                        <TableRow key={`order-table-row-${rowIndex}`}>
+                            {row.map((cell, cellIndex) => (
+                                <TableCell
+                                    key={`order-table-cell-${rowIndex}-${cellIndex}`}
+                                    className="max-w-[160px] px-3 py-2 align-top text-[12px] leading-5"
+                                >
+                                    {cell}
+                                </TableCell>
+                            ))}
+                        </TableRow>
+                    ))}
+                </TableBody>
+            </Table>
+        </div>
+    );
+}
+
 export default function AIAssistant() {
     const page = usePage<AssistantPageProps>();
     const initialConversationId = page.props.conversationId ?? null;
@@ -771,7 +912,7 @@ export default function AIAssistant() {
         number | null
     >(null);
     const [warnings, setWarnings] = useState<string[]>([]);
-    const [mode, setMode] = useState<AssistantMode>('auto');
+    const [mode] = useState<AssistantMode>('deep');
     const [streamStatus, setStreamStatus] = useState<string | null>(null);
     const [statusTrail, setStatusTrail] = useState<string[]>([]);
     const [requestStartedAt, setRequestStartedAt] = useState<number | null>(
@@ -793,17 +934,20 @@ export default function AIAssistant() {
     );
     const [taskRunBusyAction, setTaskRunBusyAction] = useState<string | null>(null);
     const [traceEvents, setTraceEvents] = useState<string[]>([]);
+    const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(true);
+    const [showScrollToBottom, setShowScrollToBottom] = useState(false);
     const traceMode = true;
     const activeRequestControllerRef = useRef<AbortController | null>(null);
     const userCancelledRef = useRef(false);
     const terminalScrollRef = useRef<HTMLDivElement | null>(null);
+    const messagesScrollRef = useRef<HTMLDivElement | null>(null);
     const typedCommandTimersRef = useRef<number[]>([]);
 
     const suggestions = [
-        { title: 'Plan Laravel auth flow', icon: FileText },
-        { title: 'Generate UI image prompt', icon: ImageIcon },
-        { title: 'Explain model routing policy', icon: Bot },
-        { title: 'Write controller + tests', icon: Code2 },
+        { title: 'Show latest orders', icon: FileText },
+        { title: 'Show delivered orders', icon: ImageIcon },
+        { title: 'Analyze delivered orders', icon: Bot },
+        { title: 'Find order UC001', icon: Code2 },
     ];
 
     const history = useMemo(
@@ -814,11 +958,9 @@ export default function AIAssistant() {
         taskRun !== null &&
         taskRun.pipeline?.enabled === true &&
         taskRun.status !== 'completed';
-    const showPipelineSuggestion =
-        !hasActivePipelineRun &&
-        taskRun === null &&
-        conversationId !== null &&
-        looksLikeStructuredPipelineGoal(prompt);
+    const showPipelineSuggestion = false;
+    const thinBlackScrollbarClass =
+        '[scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-black/80';
 
     const pushTraceEvent = (entry: string) => {
         setTraceEvents((previous) => [
@@ -900,6 +1042,34 @@ export default function AIAssistant() {
             }
         };
     }, []);
+
+    const updateScrollToBottomVisibility = () => {
+        const container = messagesScrollRef.current;
+
+        if (!container) {
+            setShowScrollToBottom(false);
+            return;
+        }
+
+        const distanceFromBottom =
+            container.scrollHeight - container.scrollTop - container.clientHeight;
+
+        setShowScrollToBottom(distanceFromBottom > 120);
+    };
+
+    const scrollMessagesToBottom = (behavior: ScrollBehavior = 'smooth') => {
+        const container = messagesScrollRef.current;
+
+        if (!container) {
+            return;
+        }
+
+        container.scrollTo({
+            top: container.scrollHeight,
+            behavior,
+        });
+        window.requestAnimationFrame(() => updateScrollToBottomVisibility());
+    };
 
     const pushTerminalLine = (kind: TerminalLine['kind'], text: string) => {
         if (text.trim() === '') {
@@ -987,6 +1157,7 @@ export default function AIAssistant() {
         ];
 
         setMessages((previous) => [...previous, userMessage]);
+        window.requestAnimationFrame(() => scrollMessagesToBottom('smooth'));
         setPrompt('');
         setWarnings([]);
         setStreamStatus(null);
@@ -1009,10 +1180,7 @@ export default function AIAssistant() {
             activeRequestControllerRef.current = controller;
             userCancelledRef.current = false;
             pushTraceEvent(`request started mode=${mode}`);
-            const requestTimeoutMs =
-                mode === 'deep'
-                    ? DEEP_MODE_TIMEOUT_MS
-                    : FAST_MODE_TIMEOUT_MS;
+            const requestTimeoutMs = DEEP_MODE_TIMEOUT_MS;
             const timeout = window.setTimeout(
                 () => controller.abort(),
                 requestTimeoutMs,
@@ -1070,6 +1238,7 @@ export default function AIAssistant() {
                 let finalPlanModel: string | undefined;
                 let finalThinking: string | undefined;
                 let finalPlanThinking: string | undefined;
+                let finalMeta: Record<string, unknown> | undefined;
                 let finalTaskRun: TaskRunPayload | null = null;
 
                 while (true) {
@@ -1156,6 +1325,10 @@ export default function AIAssistant() {
                                 typeof event.plan_thinking === 'string' &&
                                 event.plan_thinking.trim() !== ''
                                     ? event.plan_thinking
+                                    : undefined;
+                            finalMeta =
+                                event.meta && typeof event.meta === 'object'
+                                    ? event.meta
                                     : undefined;
 
                             finalTaskRun =
@@ -1428,6 +1601,7 @@ export default function AIAssistant() {
                                   planModel: finalPlanModel,
                                   thinking: finalThinking,
                                   planThinking: finalPlanThinking,
+                                  meta: finalMeta,
                               }
                             : message,
                     ),
@@ -1444,7 +1618,7 @@ export default function AIAssistant() {
                 error instanceof DOMException && error.name === 'AbortError'
                     ? userCancelledRef.current
                         ? 'Request stopped.'
-                        : `Request timed out after ${Math.floor((mode === 'deep' ? DEEP_MODE_TIMEOUT_MS : FAST_MODE_TIMEOUT_MS) / 1000)} seconds. ${mode === 'deep' ? 'Deep mode runs two model passes and can take longer; try Fast mode for quicker replies.' : 'The server/model is still taking too long; check Ollama/server health and try again.'}`
+                        : `Request timed out after ${Math.floor(DEEP_MODE_TIMEOUT_MS / 1000)} seconds. Deep mode runs planning and execution, so long requests can take longer.`
                     : error instanceof Error
                     ? error.message
                     : 'Unexpected assistant error.';
@@ -1835,33 +2009,38 @@ export default function AIAssistant() {
 
     return (
         <AppLayout breadcrumbs={breadcrumbs}>
-            <Head title="AI Assistant" />
-            <div className="h-full flex-1 overflow-hidden">
-                <div className="flex h-full flex-col lg:flex-row">
-                    <section className="flex min-h-[70vh] flex-1 flex-col bg-background">
-                        <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 pb-6 pt-10 sm:px-6 lg:pt-12">
+            <Head title="RealDeal Assistant" />
+            <div className="h-[calc(100svh-4rem)] max-h-[calc(100svh-4rem)] min-h-[calc(100svh-4rem)] flex-1 overflow-hidden">
+                <div className="flex h-full min-h-0 flex-col lg:flex-row">
+                    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
+                        <div
+                            className={`mx-auto flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden px-4 pb-6 pt-6 sm:px-6 lg:pt-8 ${
+                                isRightPanelCollapsed ? 'max-w-none' : 'max-w-4xl'
+                            }`}
+                        >
                             {messages.length === 0 ? (
-                                <>
-                                    <div className="space-y-4 text-center">
+                                <div
+                                    className={`min-h-0 flex-1 overflow-y-auto px-1 ${thinBlackScrollbarClass}`}
+                                >
+                                    <div className="mt-16 space-y-4 text-center sm:mt-24">
                                         <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
-                                            Welcome to Script
+                                            RealDeal Logistics Assistant
                                         </h1>
-                                        <p className="text-sm text-muted-foreground sm:text-base">
-                                            Ask for planning with `glm-5:cloud`,
-                                            coding with `qwen3-coder-next:cloud`,
-                                            and retrieval with
-                                            `qwen3-embedding:0.6b`.
+                                        <p className="mx-auto max-w-2xl text-sm text-muted-foreground sm:text-base">
+                                            Ask about orders, deliveries, clients, and office
+                                            work. Start with `show orders`, `show delivered
+                                            orders`, or `find order UC001`.
                                         </p>
                                     </div>
 
-                                    <div className="mx-auto mt-10 grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
+                                    <div className="mx-auto mt-10 grid w-full max-w-2xl grid-cols-1 gap-3 sm:grid-cols-2">
                                         {suggestions.map((item) => (
                                             <Card
                                                 key={item.title}
-                                                className="flex-row items-center justify-between px-4 py-3"
+                                                className="flex-row items-center justify-between gap-3 border-border/70 bg-card/70 px-4 py-3 shadow-none backdrop-blur"
                                             >
                                                 <div className="flex items-center gap-3">
-                                                    <div className="rounded-md bg-secondary p-2 text-secondary-foreground">
+                                                    <div className="rounded-full bg-secondary p-2 text-secondary-foreground">
                                                         <item.icon className="size-4" />
                                                     </div>
                                                     <span className="text-sm font-medium">
@@ -1881,54 +2060,73 @@ export default function AIAssistant() {
                                             </Card>
                                         ))}
                                     </div>
-                                </>
+                                </div>
                             ) : (
-                                <div className="flex-1 space-y-3 overflow-y-auto rounded-xl border bg-muted/20 p-3">
+                                <div
+                                    ref={messagesScrollRef}
+                                    onScroll={updateScrollToBottomVisibility}
+                                    className={`min-h-0 flex-1 space-y-6 overflow-y-auto px-1 pt-3 ${thinBlackScrollbarClass}`}
+                                >
                                     {messages.map((message) => (
                                         <div
                                             key={message.id}
                                             className={
                                                 message.role === 'user'
-                                                    ? 'ml-auto max-w-[85%] rounded-xl bg-primary px-3 py-2 text-sm text-primary-foreground'
-                                                    : 'mr-auto max-w-[90%] rounded-xl border bg-background px-3 py-2 text-sm'
+                                                    ? 'ml-auto max-w-[85%] rounded-[28px] bg-primary px-4 py-3 text-sm text-primary-foreground shadow-sm'
+                                                    : 'mr-auto max-w-[92%] px-1 text-sm'
                                             }
                                         >
-                                            {message.role === 'assistant' ? (
-                                                <FormattedAssistantMessage
-                                                    content={message.content}
-                                                />
-                                            ) : (
-                                                <p className="whitespace-pre-wrap">
-                                                    {message.content}
-                                                </p>
-                                            )}
-                                            {message.role === 'assistant' &&
-                                                message.model && (
-                                                    <p className="mt-2 text-[11px] text-muted-foreground">
-                                                        {message.stage === 'plan'
-                                                            ? 'Plan'
-                                                            : message.stage ===
-                                                                'execution'
-                                                              ? 'Execution'
-                                                              : 'Assistant'}{' '}
-                                                        · {message.model}
-                                                        {message.fallbackUsed
-                                                            ? ' (fallback)'
-                                                            : ''}
-                                                    </p>
-                                                )}
-                                            {message.role === 'assistant' && (
-                                                <AssistantDetails
-                                                    plan={message.plan}
-                                                    planModel={message.planModel}
-                                                    thinking={message.thinking}
-                                                    planThinking={message.planThinking}
-                                                />
-                                            )}
+                                            {(() => {
+                                                const orderTable = extractOrderTable(message.meta);
+
+                                                return (
+                                                    <>
+                                                        {message.role === 'assistant' ? (
+                                                            <>
+                                                                <FormattedAssistantMessage
+                                                                    content={message.content}
+                                                                />
+                                                                {orderTable && (
+                                                                    <AssistantOrderTable
+                                                                        table={orderTable}
+                                                                    />
+                                                                )}
+                                                            </>
+                                                        ) : (
+                                                            <p className="whitespace-pre-wrap">
+                                                                {message.content}
+                                                            </p>
+                                                        )}
+                                                        {message.role === 'assistant' &&
+                                                            message.model && (
+                                                                <p className="mt-2 text-[11px] text-muted-foreground">
+                                                                    {message.stage === 'plan'
+                                                                        ? 'Plan'
+                                                                        : message.stage ===
+                                                                            'execution'
+                                                                          ? 'Execution'
+                                                                          : 'Assistant'}{' '}
+                                                                    · {message.model}
+                                                                    {message.fallbackUsed
+                                                                        ? ' (fallback)'
+                                                                        : ''}
+                                                                </p>
+                                                            )}
+                                                        {message.role === 'assistant' && (
+                                                            <AssistantDetails
+                                                                plan={message.plan}
+                                                                planModel={message.planModel}
+                                                                thinking={message.thinking}
+                                                                planThinking={message.planThinking}
+                                                            />
+                                                        )}
+                                                    </>
+                                                );
+                                            })()}
                                         </div>
                                     ))}
                                     {isSending && (
-                                        <div className="mr-auto max-w-[90%] rounded-xl border bg-background px-3 py-2 text-sm text-muted-foreground">
+                                        <div className="mr-auto max-w-[92%] px-1 text-sm text-muted-foreground">
                                             <div className="inline-flex items-center gap-2">
                                                 <Loader2 className="size-4 animate-spin" />
                                                 <span>
@@ -1944,17 +2142,16 @@ export default function AIAssistant() {
                                                     mode,
                                                 )}
                                             </p>
-                                            {mode === 'deep' &&
-                                                planningPreview.trim() !== '' && (
-                                                    <div className="mt-2 rounded-md border bg-muted/30 p-2">
-                                                        <p className="text-[11px] font-medium text-muted-foreground">
-                                                            Live Planning
-                                                        </p>
-                                                        <p className="mt-1 whitespace-pre-wrap text-[12px] text-muted-foreground">
-                                                            {planningPreview}
-                                                        </p>
-                                                    </div>
-                                                )}
+                                            {planningPreview.trim() !== '' && (
+                                                <div className="mt-2 rounded-md border bg-muted/30 p-2">
+                                                    <p className="text-[11px] font-medium text-muted-foreground">
+                                                        Live Planning
+                                                    </p>
+                                                    <p className="mt-1 whitespace-pre-wrap text-[12px] text-muted-foreground">
+                                                        {planningPreview}
+                                                    </p>
+                                                </div>
+                                            )}
                                             <p className="mt-1 text-[11px] text-muted-foreground">
                                                 Elapsed: {elapsedSeconds}s
                                                 {' · '}
@@ -1987,18 +2184,30 @@ export default function AIAssistant() {
                                             )}
                                         </div>
                                     )}
+                                    {showScrollToBottom && (
+                                        <Button
+                                            type="button"
+                                            size="icon"
+                                            className="sticky right-4 bottom-4 ml-auto flex size-10 rounded-full shadow-lg"
+                                            onClick={() => scrollMessagesToBottom('smooth')}
+                                            aria-label="Scroll to latest messages"
+                                        >
+                                            <ChevronDown className="size-4" />
+                                        </Button>
+                                    )}
                                 </div>
                             )}
 
-                            <div className="mt-auto pt-6">
-                                <Card className="gap-3 px-3 py-3 sm:px-4">
+                            <div className="sticky bottom-0 z-10 shrink-0 border-t border-border/60 bg-background/95 pt-4">
+                                <div className="mx-auto w-full max-w-3xl rounded-[28px] border border-border/70 bg-background/95 p-3 shadow-xl backdrop-blur">
                                     {!hasActivePipelineRun ? (
                                         <>
-                                            <div className="flex items-center gap-2 text-xs">
+                                            <div className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">
                                                 <Button
                                                     type="button"
                                                     size="sm"
-                                                    variant="outline"
+                                                    variant="ghost"
+                                                    className="rounded-full"
                                                     onClick={() => void startNewChat()}
                                                     disabled={
                                                         isSending ||
@@ -2011,26 +2220,9 @@ export default function AIAssistant() {
                                                     )}
                                                     New chat
                                                 </Button>
-                                                <Button
-                                                    type="button"
-                                                    size="sm"
-                                                    variant={mode === 'auto' ? 'default' : 'secondary'}
-                                                    onClick={() => setMode('auto')}
-                                                >
-                                                    Fast
-                                                </Button>
-                                                <Button
-                                                    type="button"
-                                                    size="sm"
-                                                    variant={mode === 'deep' ? 'default' : 'secondary'}
-                                                    onClick={() => setMode('deep')}
-                                                >
-                                                    Deep
-                                                </Button>
-                                                <span className="text-muted-foreground">
-                                                    {mode === 'deep'
-                                                        ? 'glm-5 plans, coder executes'
-                                                        : 'single-pass by intent'}
+                                                <span>
+                                                    RealDeal office assistant with direct order
+                                                    lookup from `sheet_orders`
                                                 </span>
                                             </div>
                                             <form
@@ -2060,16 +2252,16 @@ export default function AIAssistant() {
                                                         }
                                                     }}
                                                     maxLength={3000}
-                                                    rows={3}
-                                                    placeholder="Ask about your Laravel project..."
-                                                    className="border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring/50 min-h-24 w-full resize-none rounded-md border px-3 py-2 pr-12 text-sm shadow-xs outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
+                                                    rows={1}
+                                                    placeholder="Ask about orders, deliveries, clients, or office work..."
+                                                    className="border-input bg-transparent ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring/50 max-h-40 min-h-[56px] w-full resize-none rounded-[22px] border px-4 py-4 pr-14 text-sm shadow-none outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
                                                 />
                                                 {isSending ? (
                                                     <Button
                                                         size="icon"
                                                         type="button"
                                                         variant="destructive"
-                                                        className="absolute right-2 bottom-2 size-9"
+                                                        className="absolute right-3 bottom-3 size-9 rounded-full"
                                                         onClick={stopActiveRequest}
                                                     >
                                                         <Square className="size-4" />
@@ -2078,7 +2270,7 @@ export default function AIAssistant() {
                                                     <Button
                                                         size="icon"
                                                         type="submit"
-                                                        className="absolute right-2 bottom-2 size-9"
+                                                        className="absolute right-3 bottom-3 size-9 rounded-full"
                                                         disabled={
                                                             isCreatingConversation ||
                                                             switchingConversationId !== null
@@ -2117,7 +2309,7 @@ export default function AIAssistant() {
                                                     </div>
                                                 </div>
                                             )}
-                                            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                                            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
                                                 <div className="flex items-center gap-3">
                                                     <button
                                                         type="button"
@@ -2144,78 +2336,111 @@ export default function AIAssistant() {
                                         </div>
                                     )}
                                     {warnings.length > 0 && (
-                                        <div className="rounded-md border border-amber-300/50 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                                        <div className="mt-3 rounded-2xl border border-amber-300/50 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
                                             {warnings.join(' ')}
                                         </div>
                                     )}
-                                </Card>
+                                </div>
                                 <p className="mt-3 text-center text-xs text-muted-foreground">
-                                    Routing: `glm-5:cloud` for planning,
-                                    `qwen3-coder-next:cloud` for coding,
-                                    `qwen3-embedding:0.6b` for retrieval. Deep
-                                    mode runs planning then execution.
+                                    Order lookup and order analysis now run directly on
+                                    `sheet_orders`, and results are rendered in tables.
                                 </p>
                             </div>
                         </div>
                     </section>
 
-                    <aside className="w-full border-t bg-muted/30 lg:w-96 lg:border-t-0 lg:border-l">
-                        <div className="flex h-full flex-col">
+                    <aside
+                        className={`min-h-0 overflow-visible border-t bg-muted/30 transition-all duration-200 lg:h-full lg:border-t-0 lg:border-l ${
+                            isRightPanelCollapsed ? 'w-0 border-transparent lg:w-0 lg:border-l-0' : 'lg:w-96'
+                        }`}
+                    >
+                        <div className="relative flex h-full min-h-0 flex-col">
                             <div className="flex items-center justify-between border-b px-4 py-4">
-                                <h2 className="text-sm font-semibold">
-                                    Conversations
-                                </h2>
-                                <Button
-                                    size="sm"
-                                    variant="secondary"
-                                    onClick={() => void startNewChat()}
-                                    disabled={
-                                        isSending ||
-                                        isCreatingConversation ||
-                                        switchingConversationId !== null
-                                    }
-                                >
-                                    New
-                                </Button>
-                            </div>
-                            <div className="max-h-[320px] space-y-1 overflow-y-auto border-b p-2 lg:h-[42vh] lg:max-h-none">
-                                {conversations.length === 0 ? (
-                                    <div className="rounded-lg border bg-background px-3 py-3 text-xs text-muted-foreground">
-                                        No conversations yet.
-                                    </div>
+                                {isRightPanelCollapsed ? (
+                                    <Button
+                                        type="button"
+                                        size="icon"
+                                        variant="ghost"
+                                        className="absolute top-4 -left-10 z-20 size-8 rounded-full border bg-background shadow-sm"
+                                        onClick={() => setIsRightPanelCollapsed(false)}
+                                        aria-label="Expand assistant sidebar"
+                                    >
+                                        <ChevronDown className="size-4 rotate-90 transition-transform" />
+                                    </Button>
                                 ) : (
-                                    conversations.map((item) => (
-                                        <button
-                                            key={item.id}
-                                            type="button"
-                                            onClick={() =>
-                                                void loadConversation(item.id)
-                                            }
+                                    <>
+                                        <div className="flex items-center gap-2">
+                                            <Button
+                                                type="button"
+                                                size="icon"
+                                                variant="ghost"
+                                                className="size-8"
+                                                onClick={() => setIsRightPanelCollapsed(true)}
+                                                aria-label="Collapse assistant sidebar"
+                                            >
+                                                <ChevronDown className="size-4 -rotate-90 transition-transform" />
+                                            </Button>
+                                            <h2 className="text-sm font-semibold">
+                                                Conversations
+                                            </h2>
+                                        </div>
+                                        <Button
+                                            size="sm"
+                                            variant="secondary"
+                                            onClick={() => void startNewChat()}
                                             disabled={
                                                 isSending ||
                                                 isCreatingConversation ||
                                                 switchingConversationId !== null
                                             }
-                                            className={`w-full rounded-lg border px-3 py-3 text-left transition-colors ${
-                                                item.id === conversationId
-                                                    ? 'border-primary bg-accent'
-                                                    : 'bg-background hover:bg-accent'
-                                            }`}
                                         >
-                                            <p className="text-sm font-medium">
-                                                {item.title &&
-                                                item.title !== 'AI Assistant'
-                                                    ? item.title
-                                                    : `Conversation #${item.id}`}
-                                            </p>
-                                            <p className="mt-1 text-xs text-muted-foreground">
-                                                {item.preview}
-                                            </p>
-                                        </button>
-                                    ))
+                                            New
+                                        </Button>
+                                    </>
                                 )}
                             </div>
-                            <div className="border-b bg-background/60 p-3">
+                            {!isRightPanelCollapsed && (
+                                <>
+                                    <div
+                                        className={`max-h-[320px] space-y-1 overflow-y-auto border-b p-2 lg:h-[42vh] lg:max-h-none ${thinBlackScrollbarClass}`}
+                                    >
+                                        {conversations.length === 0 ? (
+                                            <div className="rounded-lg border bg-background px-3 py-3 text-xs text-muted-foreground">
+                                                No conversations yet.
+                                            </div>
+                                        ) : (
+                                            conversations.map((item) => (
+                                                <button
+                                                    key={item.id}
+                                                    type="button"
+                                                    onClick={() =>
+                                                        void loadConversation(item.id)
+                                                    }
+                                                    disabled={
+                                                        isSending ||
+                                                        isCreatingConversation ||
+                                                        switchingConversationId !== null
+                                                    }
+                                                    className={`w-full rounded-lg border px-3 py-3 text-left transition-colors ${
+                                                        item.id === conversationId
+                                                            ? 'border-primary bg-accent'
+                                                            : 'bg-background hover:bg-accent'
+                                                    }`}
+                                                >
+                                                    <p className="text-sm font-medium">
+                                                        {item.title &&
+                                                        item.title !== 'RealDeal Assistant'
+                                                            ? item.title
+                                                            : `Conversation #${item.id}`}
+                                                    </p>
+                                                    <p className="mt-1 text-xs text-muted-foreground">
+                                                        {item.preview}
+                                                    </p>
+                                                </button>
+                                            ))
+                                        )}
+                                    </div>
+                                    <div className="border-b bg-background/60 p-3">
                                 <div className="mb-2 flex items-center justify-between">
                                     <h3 className="text-sm font-semibold">Task Run</h3>
                                     {taskRunBusyAction && (
@@ -2226,8 +2451,8 @@ export default function AIAssistant() {
                                     )}
                                 </div>
 
-                                {taskRun ? (
-                                    <div className="space-y-3">
+                                        {taskRun ? (
+                                            <div className="space-y-3">
                                         <div className="rounded-md border p-2 text-xs">
                                             <p className="font-medium">
                                                 {taskRun.pipeline?.resource
@@ -2332,7 +2557,9 @@ export default function AIAssistant() {
                                         {taskRun.plan.length > 0 && (
                                             <div className="rounded-md border p-2">
                                                 <p className="text-xs font-medium">Steps</p>
-                                                <div className="mt-1 max-h-28 space-y-1 overflow-y-auto text-xs">
+                                                <div
+                                                    className={`mt-1 max-h-28 space-y-1 overflow-y-auto text-xs ${thinBlackScrollbarClass}`}
+                                                >
                                                     {taskRun.plan.map((step, index) => (
                                                         <p
                                                             key={`${taskRun.id}-step-${index}`}
@@ -2355,7 +2582,9 @@ export default function AIAssistant() {
                                                 <p className="text-xs font-medium">
                                                     Preview · {taskRunPreview.step_title ?? `Step ${taskRunPreview.step_index + 1}`}
                                                 </p>
-                                                <div className="mt-1 max-h-32 space-y-1 overflow-y-auto text-xs text-muted-foreground">
+                                                <div
+                                                    className={`mt-1 max-h-32 space-y-1 overflow-y-auto text-xs text-muted-foreground ${thinBlackScrollbarClass}`}
+                                                >
                                                     {(taskRunPreview.changes ?? []).length === 0 ? (
                                                         <p>No file changes in preview.</p>
                                                     ) : (
@@ -2373,17 +2602,14 @@ export default function AIAssistant() {
                                                 </div>
                                             </div>
                                         )}
+                                            </div>
+                                        ) : (
+                                            <div className="rounded-md border p-2 text-xs text-muted-foreground">
+                                                No active workflow run.
+                                            </div>
+                                        )}
                                     </div>
-                                ) : (
-                                    <div className="rounded-md border p-2 text-xs text-muted-foreground">
-                                        No active structured run.
-                                        {showPipelineSuggestion
-                                            ? ' Use the prompt CTA to run this request as a structured pipeline.'
-                                            : ' A structured pipeline suggestion appears automatically for CRUD/module prompts.'}
-                                    </div>
-                                )}
-                            </div>
-                            <div className="flex min-h-[280px] flex-1 flex-col">
+                                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                                 {(isSending || traceEvents.length > 0) && (
                                     <>
                                         <div className="flex items-center justify-between border-b px-4 py-3">
@@ -2397,7 +2623,9 @@ export default function AIAssistant() {
                                                 Clear
                                             </Button>
                                         </div>
-                                        <div className="max-h-48 overflow-y-auto border-b bg-muted/20 p-3 text-xs">
+                                        <div
+                                            className={`max-h-48 overflow-y-auto border-b bg-muted/20 p-3 text-xs ${thinBlackScrollbarClass}`}
+                                        >
                                             {traceEvents.length === 0 ? (
                                                 <p className="text-muted-foreground">
                                                     Trace timeline will appear while generating.
@@ -2433,37 +2661,39 @@ export default function AIAssistant() {
                                         Clear
                                     </Button>
                                 </div>
-                                <div
-                                    ref={terminalScrollRef}
-                                    className="h-64 flex-1 overflow-y-auto bg-zinc-950 p-3 font-mono text-xs lg:h-auto"
-                                >
-                                    {terminalLines.length === 0 ? (
-                                        <p className="text-zinc-400">
-                                            Shell output will appear here when
-                                            the assistant runs commands.
-                                        </p>
-                                    ) : (
-                                        <div className="space-y-1">
-                                            {terminalLines.map((line) => (
-                                                <p
-                                                    key={line.id}
-                                                    className={`whitespace-pre-wrap ${
-                                                        line.kind === 'command'
-                                                            ? 'text-emerald-300'
-                                                            : line.kind === 'stderr'
-                                                              ? 'text-rose-300'
-                                                              : line.kind === 'meta'
-                                                                ? 'text-zinc-400'
-                                                                : 'text-zinc-200'
-                                                    }`}
-                                                >
-                                                    {line.text}
+                                        <div
+                                            ref={terminalScrollRef}
+                                            className={`h-64 flex-1 overflow-y-auto bg-zinc-950 p-3 font-mono text-xs lg:h-auto ${thinBlackScrollbarClass}`}
+                                        >
+                                            {terminalLines.length === 0 ? (
+                                                <p className="text-zinc-400">
+                                                    Shell output will appear here when
+                                                    the assistant runs commands.
                                                 </p>
-                                            ))}
+                                            ) : (
+                                                <div className="space-y-1">
+                                                    {terminalLines.map((line) => (
+                                                        <p
+                                                            key={line.id}
+                                                            className={`whitespace-pre-wrap ${
+                                                                line.kind === 'command'
+                                                                    ? 'text-emerald-300'
+                                                                    : line.kind === 'stderr'
+                                                                      ? 'text-rose-300'
+                                                                      : line.kind === 'meta'
+                                                                        ? 'text-zinc-400'
+                                                                        : 'text-zinc-200'
+                                                            }`}
+                                                        >
+                                                            {line.text}
+                                                        </p>
+                                                    ))}
+                                                </div>
+                                            )}
                                         </div>
-                                    )}
-                                </div>
-                            </div>
+                                    </div>
+                                </>
+                            )}
                         </div>
                     </aside>
                 </div>

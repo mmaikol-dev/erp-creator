@@ -43,7 +43,7 @@ class ConversationMemoryService
     {
         return AiConversation::create([
             'user_id' => $user->id,
-            'title' => $title ?? 'AI Assistant',
+            'title' => $title ?? 'RealDeal Assistant',
         ]);
     }
 
@@ -87,7 +87,7 @@ class ConversationMemoryService
     }
 
     /**
-     * @return list<array{id: int, role: string, content: string, model: ?string, stage: ?string, fallbackUsed: bool}>
+     * @return list<array{id: int, role: string, content: string, model: ?string, stage: ?string, fallbackUsed: bool, meta?: array<string, mixed>}>
      */
     public function recentMessages(AiConversation $conversation, int $limit = 30): array
     {
@@ -106,6 +106,7 @@ class ConversationMemoryService
                 'model' => $message->model,
                 'stage' => $message->stage,
                 'fallbackUsed' => (bool) data_get($message->meta, 'fallback_used', false),
+                'meta' => is_array($message->meta) ? $message->meta : [],
             ];
         })->all();
     }
